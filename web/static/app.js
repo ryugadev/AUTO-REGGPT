@@ -7,6 +7,7 @@
   const LS_WORKER = 'gpt_reg.worker_config';
   const LS_SETTINGS = 'gpt_reg.settings'; // {mode, headless, debug, job_timeout, default_password}
   const LS_PROXY = 'gpt_reg.proxy_url';
+  const LS_ACTIVE_TAB = 'gpt_reg.active_tab';
 
   // ── State ─────────────────────────────────────────────────────────
   function loadSettings() {
@@ -58,6 +59,9 @@
     inputHint:   $('input-hint'),
     mailModeSelect: $('mail-mode-select'),
     mailModeConfigHost: $('mail-mode-config-host'),
+    // Post-reg toggles
+    postRegSessionToggle: $('post-reg-session-toggle'),
+    postRegLinkToggle:    $('post-reg-link-toggle'),
     // Proxy strip
     proxyInput:        $('proxy-input'),
     btnProxyTest:      $('btn-proxy-test'),
@@ -68,6 +72,26 @@
   };
 
   // ── Helpers ───────────────────────────────────────────────────────
+  const icons = Object.freeze({
+    stop: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>',
+    retry: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>',
+    remove: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+    copy: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+    download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
+    link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4"/><path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 1 0 7.07 7.07L13 19"/></svg>',
+    token: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2"/><path d="M7.61 13.39a5.5 5.5 0 1 0 7.78 7.78L21 15.5l-7.5-7.5-5.89 5.39Z"/><path d="m14.5 6.5 3 3"/></svg>',
+  });
+  const mailModeUiCopy = Object.freeze({
+    outlook: {
+      input_help: 'One Outlook combo per line.',
+      input_placeholder: 'email|password|refresh_token|client_id',
+    },
+    worker: {
+      input_help: 'One iCloud email per line via Worker OTP.',
+      input_placeholder: 'user@icloud.com',
+    },
+  });
+
   function fmtDuration(secs) {
     if (secs == null) return '';
     if (secs < 60) return secs.toFixed(1) + 's';
@@ -90,13 +114,51 @@
     });
   }
 
+  function icon(name) {
+    return icons[name] || '';
+  }
+
+  function copyText(text) {
+    return navigator.clipboard.writeText(text).catch(() => {
+      alert('Copy failed.');
+      throw new Error('copy failed');
+    });
+  }
+
+  function activateTab(tabId) {
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.tab === tabId);
+    });
+    document.querySelectorAll('.tab-content').forEach((tab) => {
+      tab.classList.toggle('active', tab.id === `tab-${tabId}`);
+    });
+    localStorage.setItem(LS_ACTIVE_TAB, tabId);
+  }
+
+  function initTabs() {
+    if (document.body.dataset.tabsBound === 'true') return;
+    document.body.dataset.tabsBound = 'true';
+    document.querySelectorAll('.tab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => activateTab(btn.dataset.tab));
+    });
+    const initialTab = localStorage.getItem(LS_ACTIVE_TAB) || document.querySelector('.tab-btn.active')?.dataset.tab || 'reg';
+    activateTab(initialTab);
+  }
+
+  window.GptUi = Object.assign(window.GptUi || {}, {
+    icon,
+    copyText,
+    activateTab,
+    initTabs,
+  });
+
   // ── Combo counter ─────────────────────────────────────────────────
   function updateComboCount() {
     const lines = dom.comboInput.value.split('\n').filter((l) => {
       const s = l.trim();
       return s && !s.startsWith('#');
     });
-    dom.comboCount.textContent = `${lines.length} combo`;
+    dom.comboCount.textContent = `${lines.length} combo${lines.length === 1 ? '' : 's'}`;
   }
 
   dom.comboInput.addEventListener('input', updateComboCount);
@@ -104,7 +166,7 @@
   // ── Render job list ──────────────────────────────────────────────
   function renderJobs() {
     if (state.order.length === 0) {
-      dom.jobList.innerHTML = '<div class="empty">Chưa có job. Paste combo + bấm Chạy.</div>';
+      dom.jobList.innerHTML = '<div class="empty">No jobs yet. Paste combos and click Run.</div>';
       dom.jobSummary.textContent = '0 total';
       return;
     }
@@ -115,18 +177,28 @@
       if (!j) return '';
       stats[j.status] = (stats[j.status] || 0) + 1;
       const cls = state.activeJobId === id ? 'job is-active' : 'job';
-      // Nút hành động: running → Stop, others → Retry
       const actionBtn = j.status === 'running'
-        ? `<button class="icon-btn icon-danger" data-action="stop" data-id="${escHtml(id)}" title="Dừng">■</button>`
-        : `<button class="icon-btn" data-action="retry" data-id="${escHtml(id)}" title="Chạy lại">↻</button>`;
+        ? `<button class="icon-btn icon-danger" data-action="stop" data-id="${escHtml(id)}" title="Stop">${icon('stop')}</button>`
+        : `<button class="icon-btn" data-action="retry" data-id="${escHtml(id)}" title="Retry">${icon('retry')}</button>`;
+      let postRegBtns = '';
+      if (j.has_session) {
+        postRegBtns += `<button class="icon-btn" data-action="copy-session" data-id="${escHtml(id)}" title="Copy session JSON">${icon('copy')}</button>`;
+        postRegBtns += `<button class="icon-btn" data-action="download-session" data-id="${escHtml(id)}" title="Download session JSON">${icon('download')}</button>`;
+      }
+      if (j.payment_link) {
+        postRegBtns += `<button class="icon-btn" data-action="copy-link" data-id="${escHtml(id)}" title="Copy payment link">${icon('link')}</button>`;
+      }
       return `
         <div class="${cls}" data-id="${escHtml(id)}">
           <div class="job-status status-${escHtml(j.status)}">${escHtml(j.status)}</div>
-          <div class="job-email" title="${escHtml(j.email)}">${escHtml(j.email)}<span class="badge-mode badge-mode-${escHtml(j.mail_mode || 'outlook')}">${escHtml(j.mail_mode || 'outlook')}</span></div>
+          <div class="job-main">
+            <div class="job-email" title="${escHtml(j.email)}">${escHtml(j.email)}<span class="badge-mode badge-mode-${escHtml(j.mail_mode || 'outlook')}">${escHtml(j.mail_mode || 'outlook')}</span></div>
+          </div>
           <div class="job-duration">${escHtml(fmtDuration(j.duration))}</div>
           <div class="job-actions">
+            ${postRegBtns}
             ${actionBtn}
-            <button class="icon-btn icon-danger" data-action="remove" data-id="${escHtml(id)}" title="Xoá khỏi list">✕</button>
+            <button class="icon-btn icon-danger" data-action="remove" data-id="${escHtml(id)}" title="Remove">${icon('remove')}</button>
           </div>
         </div>
       `;
@@ -137,8 +209,8 @@
       `${state.order.length} total`,
       stats.running ? `${stats.running} running` : '',
       stats.queued  ? `${stats.queued} queued`   : '',
-      stats.success ? `${stats.success} ok`      : '',
-      stats.error   ? `${stats.error} err`       : '',
+      stats.success ? `${stats.success} done`    : '',
+      stats.error   ? `${stats.error} failed`    : '',
     ].filter(Boolean).join(' · ');
 
     updateStatusPill(stats);
@@ -182,10 +254,10 @@
     }
     dom.successPane.textContent = successLines.length
       ? successLines.join('\n')
-      : 'Format: email|password|secret_2fa|first_code';
+      : 'Format: email|password|secret_2fa';
     dom.errorPane.textContent = errorLines.length
       ? errorLines.join('\n')
-      : 'Chưa có lỗi.';
+      : 'No errors yet.';
   }
 
   // ── Render log của 1 job ─────────────────────────────────────────
@@ -222,16 +294,37 @@
       e.stopPropagation();
 
       if (action === 'retry') {
-        if (!confirm('Chạy lại job này?')) return;
-        api(`/api/jobs/${id}/retry`, { method: 'POST' }).catch(alert);
+        if (!confirm('Retry this job?')) return;
+        api(`/api/jobs/${id}/retry`, { method: 'POST' }).catch((err) => alert(err.message));
       } else if (action === 'stop') {
-        if (!confirm('Dừng job đang chạy?')) return;
-        api(`/api/jobs/${id}`, { method: 'DELETE' }).catch(alert);
+        if (!confirm('Stop this running job?')) return;
+        api(`/api/jobs/${id}`, { method: 'DELETE' }).catch((err) => alert(err.message));
       } else if (action === 'remove') {
-        if (!confirm('Xoá job này khỏi list + textarea?')) return;
+        if (!confirm('Remove this job from the list and textarea?')) return;
         const j = state.jobs.get(id);
         if (j) removeFromTextarea(j.email);
-        api(`/api/jobs/${id}`, { method: 'DELETE' }).catch(alert);
+        api(`/api/jobs/${id}`, { method: 'DELETE' }).catch((err) => alert(err.message));
+      } else if (action === 'copy-session') {
+        api(`/api/jobs/${id}`).then(d => {
+          if (d.session_data) {
+            copyText(JSON.stringify(d.session_data, null, 2));
+          }
+        }).catch(console.error);
+      } else if (action === 'download-session') {
+        api(`/api/jobs/${id}`).then(d => {
+          if (d.session_data) {
+            const blob = new Blob([JSON.stringify(d.session_data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `session_${d.email || id}.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+          }
+        }).catch(console.error);
+      } else if (action === 'copy-link') {
+        const j = state.jobs.get(id);
+        if (j && j.payment_link) copyText(j.payment_link);
       }
       return;
     }
@@ -257,7 +350,7 @@
   dom.btnRun.addEventListener('click', async () => {
     const combos = dom.comboInput.value.trim();
     if (!combos) {
-      alert('Paste combo trước đã.');
+      alert('Paste combos first.');
       return;
     }
     dom.btnRun.disabled = true;
@@ -289,7 +382,7 @@
         body: JSON.stringify(payload),
       });
     } catch (err) {
-      alert('Lỗi: ' + err.message);
+      alert('Error: ' + err.message);
     } finally {
       dom.btnRun.disabled = false;
       validateWorkerConfig();
@@ -302,12 +395,12 @@
   });
 
   dom.btnStopAll.addEventListener('click', async () => {
-    if (!confirm('Dừng TẤT CẢ jobs đang chạy/queued?')) return;
+    if (!confirm('Stop all running or queued jobs?')) return;
     try {
       const res = await api('/api/jobs/stop-all', { method: 'POST' });
       console.log('stopped:', res.stopped);
     } catch (err) {
-      alert('Lỗi: ' + err.message);
+      alert('Error: ' + err.message);
     }
   });
 
@@ -317,7 +410,7 @@
       // Refresh list (SSE sẽ broadcast clear_finished event)
       console.log('cleared:', res.removed);
     } catch (err) {
-      alert('Lỗi: ' + err.message);
+      alert('Error: ' + err.message);
     }
   });
 
@@ -366,6 +459,34 @@
     }
   });
 
+  dom.postRegSessionToggle.addEventListener('change', async () => {
+    const val = dom.postRegSessionToggle.checked;
+    try {
+      await api('/api/config', {
+        method: 'POST',
+        body: JSON.stringify({ post_reg_get_session: val }),
+      });
+      saveSettings({ post_reg_get_session: val });
+    } catch (err) {
+      console.error(err);
+      dom.postRegSessionToggle.checked = !val;
+    }
+  });
+
+  dom.postRegLinkToggle.addEventListener('change', async () => {
+    const val = dom.postRegLinkToggle.checked;
+    try {
+      await api('/api/config', {
+        method: 'POST',
+        body: JSON.stringify({ post_reg_get_link: val }),
+      });
+      saveSettings({ post_reg_get_link: val });
+    } catch (err) {
+      console.error(err);
+      dom.postRegLinkToggle.checked = !val;
+    }
+  });
+
   dom.jobTimeout.addEventListener('change', async () => {
     const val = parseInt(dom.jobTimeout.value, 10);
     if (isNaN(val) || val < 30 || val > 600) return;
@@ -386,12 +507,6 @@
   });
 
   // ── Copy buttons ─────────────────────────────────────────────────
-  function copyText(text) {
-    navigator.clipboard.writeText(text).then(
-      () => {/* noop */},
-      () => { alert('Copy fail'); },
-    );
-  }
   dom.btnCopySuccess.addEventListener('click', () => copyText(dom.successPane.textContent));
   dom.btnCopyError.addEventListener('click', () => copyText(dom.errorPane.textContent));
 
@@ -455,6 +570,12 @@
           }
           if (data.job_timeout) {
             dom.jobTimeout.value = data.job_timeout;
+          }
+          if (typeof data.post_reg_get_session === 'boolean') {
+            dom.postRegSessionToggle.checked = data.post_reg_get_session;
+          }
+          if (typeof data.post_reg_get_link === 'boolean') {
+            dom.postRegLinkToggle.checked = data.post_reg_get_link;
           }
           if ('proxy' in data) {
             applyProxyStateFromServer(data.proxy);
@@ -564,20 +685,20 @@
       const val = inp.value.trim();
       if (f.validate_prefix && f.validate_prefix.length) {
         if (!f.validate_prefix.some(p => val.startsWith(p))) {
-          errEl.textContent = `Phải bắt đầu bằng ${f.validate_prefix.join(' hoặc ')}`;
+          errEl.textContent = `Must start with ${f.validate_prefix.join(' or ')}`;
           errEl.className = 'input-error';
           valid = false;
           continue;
         }
       }
       if (f.required && !val) {
-        errEl.textContent = 'Bắt buộc';
+        errEl.textContent = 'Required';
         errEl.className = 'input-error';
         valid = false;
         continue;
       }
       if (!f.required && !val) {
-        errEl.textContent = 'Trống — Worker sẽ không gửi Authorization';
+        errEl.textContent = 'Blank — Worker sends no Authorization header';
         errEl.className = 'input-warn';
         continue;
       }
@@ -592,8 +713,9 @@
     localStorage.setItem(LS_MODE, modeId);
     const spec = state.mailModes.find(m => m.id === modeId);
     if (spec) {
-      dom.comboInput.placeholder = spec.input_placeholder;
-      dom.inputHint.textContent = spec.input_help;
+      const uiCopy = mailModeUiCopy[modeId] || {};
+      dom.comboInput.placeholder = uiCopy.input_placeholder || spec.input_placeholder;
+      dom.inputHint.textContent = uiCopy.input_help || spec.input_help;
     }
     renderMailModeConfig(state.mailModes, modeId);
   }
@@ -605,7 +727,7 @@
     } catch (err) {
       console.error('Failed to load mail modes:', err);
       state.mailModes = [
-        { id: 'outlook', label: 'Hotmail (combo)', input_placeholder: 'email|password|refresh_token|client_id', input_help: 'Mỗi dòng 1 combo Outlook 4 phần.', config_schema: [] },
+        { id: 'outlook', label: 'Hotmail (combo)', input_placeholder: 'email|password|refresh_token|client_id', input_help: 'One Outlook combo per line.', config_schema: [] },
       ];
     }
     renderMailModeSelector(state.mailModes);
@@ -652,7 +774,7 @@
     if (url) {
       setProxyStatus('idle', 'proxy set', maskProxyForDisplay(url));
     } else {
-      setProxyStatus('direct', 'direct', 'không dùng proxy');
+      setProxyStatus('direct', 'direct', 'no proxy configured');
     }
   }
 
@@ -695,9 +817,8 @@
         const label = val ? 'proxy ok' : 'direct ok';
         setProxyStatus(val ? 'ok' : 'direct', label, [ipPart, maskProxyForDisplay(val)].filter(Boolean).join(' · ') || 'reachable');
       } else if (r.public_ip && !r.ms_reachable) {
-        // Proxy sống (ip ok) nhưng Microsoft bị chặn
-        const msg = `Proxy sống (IP: ${r.public_ip}) nhưng CHẶN Microsoft.\nKhông dùng được cho Outlook OTP.\nĐổi proxy khác cho phép kết nối login.microsoftonline.com + graph.microsoft.com.`;
-        setProxyStatus('fail', 'MS blocked', `${ipPart} · chặn Microsoft — không poll OTP được`);
+        const msg = `Proxy is alive (IP: ${r.public_ip}) but Microsoft is blocked.\nThis proxy cannot be used for Outlook OTP.\nSwitch to a proxy that can reach login.microsoftonline.com and graph.microsoft.com.`;
+        setProxyStatus('fail', 'MS blocked', `${ipPart} · Microsoft blocked — OTP polling unavailable`);
         if (!opts.silent) alert(msg);
       } else {
         const errPart = r.error ? r.error : `fail: ${failedTargets.join(', ') || 'unknown'}`;
@@ -729,6 +850,8 @@
   dom.debugToggle.checked = state.debug;
   if (_savedSettings.job_timeout) dom.jobTimeout.value = _savedSettings.job_timeout;
   if (_savedSettings.default_password) dom.defaultPassword.value = _savedSettings.default_password;
+  if (_savedSettings.post_reg_get_session) dom.postRegSessionToggle.checked = true;
+  if (_savedSettings.post_reg_get_link) dom.postRegLinkToggle.checked = true;
 
   // Restore proxy from localStorage (server in-memory, mất sau restart)
   const _savedProxy = localStorage.getItem(LS_PROXY) || '';
@@ -737,7 +860,7 @@
     state.proxy = _savedProxy;
   }
   setProxyStatus(_savedProxy ? 'idle' : 'direct', _savedProxy ? 'proxy set' : 'direct',
-                 _savedProxy ? maskProxyForDisplay(_savedProxy) : 'không dùng proxy');
+                 _savedProxy ? maskProxyForDisplay(_savedProxy) : 'no proxy configured');
 
   // Sync server config on load — đẩy proxy localStorage lên server lần đầu
   api('/api/config', {
@@ -748,11 +871,14 @@
       debug: state.debug,
       job_timeout: parseInt(dom.jobTimeout.value, 10) || 240,
       proxy: _savedProxy,
+      post_reg_get_session: dom.postRegSessionToggle.checked,
+      post_reg_get_link: dom.postRegLinkToggle.checked,
     }),
   }).then((r) => {
     applyProxyStateFromServer(r.proxy);
   }).catch(console.error);
 
+  initTabs();
   updateComboCount();
   bootstrapMailModes();
   connectSSE();

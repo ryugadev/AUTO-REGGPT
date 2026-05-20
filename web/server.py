@@ -11,14 +11,23 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .manager import get_manager, get_session_manager
+from .manager import get_manager, get_session_manager, get_link_manager
 from .mail_modes import get_registry, serialize_for_api
 
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
-app = FastAPI(title="gpt_signup_hybrid web UI", version="0.1.0")
+def _asset_version() -> str:
+    """Build a lightweight cache-busting token from static file mtimes."""
+    latest_mtime = 0
+    for path in _STATIC_DIR.glob("*"):
+        if path.is_file():
+            latest_mtime = max(latest_mtime, path.stat().st_mtime_ns)
+    return str(latest_mtime or 1)
+
+
+app = FastAPI(title="gpt_signup_hybrid web UI", version="1.0.1")
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -55,6 +64,8 @@ class SetConfigRequest(BaseModel):
         default=None,
         description="HTTP/HTTPS proxy URL. Empty string = direct (clear).",
     )
+    post_reg_get_session: bool | None = None
+    post_reg_get_link: bool | None = None
 
 
 @app.get("/api/jobs")
@@ -155,6 +166,8 @@ async def get_config() -> JSONResponse:
         "debug": manager.debug,
         "job_timeout": manager.job_timeout,
         "proxy": manager.proxy,
+        "post_reg_get_session": manager.post_reg_get_session,
+        "post_reg_get_link": manager.post_reg_get_link,
     })
 
 
@@ -177,12 +190,18 @@ async def set_config(payload: SetConfigRequest) -> JSONResponse:
             raise HTTPException(400, str(exc))
     if payload.proxy is not None:
         manager.set_proxy(payload.proxy)
+    if payload.post_reg_get_session is not None:
+        manager.set_post_reg_get_session(payload.post_reg_get_session)
+    if payload.post_reg_get_link is not None:
+        manager.set_post_reg_get_link(payload.post_reg_get_link)
     return JSONResponse({
         "max_concurrent": manager.max_concurrent,
         "headless": manager.headless,
         "debug": manager.debug,
         "job_timeout": manager.job_timeout,
         "proxy": manager.proxy,
+        "post_reg_get_session": manager.post_reg_get_session,
+        "post_reg_get_link": manager.post_reg_get_link,
     })
 
 
@@ -299,6 +318,8 @@ async def events(request: Request) -> StreamingResponse:
                 "debug": manager.debug,
                 "job_timeout": manager.job_timeout,
                 "proxy": manager.proxy,
+                "post_reg_get_session": manager.post_reg_get_session,
+                "post_reg_get_link": manager.post_reg_get_link,
                 "jobs": manager.list_jobs(),
             }
             yield f"data: {json.dumps(snapshot)}\n\n"
@@ -348,6 +369,14 @@ async def on_shutdown():
         except Exception:
             pass
     sm._subscribers.clear()
+    # Link manager cleanup
+    lm = get_link_manager()
+    for q in list(lm._subscribers):
+        try:
+            q.put_nowait(None)
+        except Exception:
+            pass
+    lm._subscribers.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -502,6 +531,115 @@ async def session_events(request: Request) -> StreamingResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Link API (Get Payment Link feature)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class AddLinkJobsRequest(BaseModel):
+    combos: str = Field(..., description="email|password|secret per line")
+
+
+@app.post("/api/link/jobs")
+async def add_link_jobs(payload: AddLinkJobsRequest) -> JSONResponse:
+    lines = payload.combos.splitlines()
+    lm = get_link_manager()
+    jobs = lm.add_jobs(lines)
+    return JSONResponse({"added": len(jobs), "jobs": [j.to_dict() for j in jobs]})
+
+
+@app.get("/api/link/jobs")
+async def list_link_jobs() -> JSONResponse:
+    lm = get_link_manager()
+    return JSONResponse({"jobs": lm.list_jobs()})
+
+
+@app.post("/api/link/jobs/stop-all")
+async def stop_all_link_jobs() -> JSONResponse:
+    lm = get_link_manager()
+    cancelled = lm.stop_all()
+    return JSONResponse({"cancelled": cancelled})
+
+
+@app.post("/api/link/jobs/clear-finished")
+async def clear_finished_link_jobs() -> JSONResponse:
+    lm = get_link_manager()
+    removed = lm.clear_finished()
+    return JSONResponse({"removed": removed})
+
+
+@app.get("/api/link/jobs/{job_id}")
+async def get_link_job(job_id: str) -> JSONResponse:
+    lm = get_link_manager()
+    data = lm.get_job(job_id)
+    if data is None:
+        raise HTTPException(404, "job not found")
+    return JSONResponse(data)
+
+
+@app.post("/api/link/jobs/{job_id}/retry")
+async def retry_link_job(job_id: str) -> JSONResponse:
+    lm = get_link_manager()
+    job = lm.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.status != "error":
+        raise HTTPException(400, "job is not in error status")
+    lm.retry_job(job_id)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/link/jobs/{job_id}")
+async def delete_link_job(job_id: str) -> JSONResponse:
+    lm = get_link_manager()
+    ok = lm.remove_job(job_id)
+    if not ok:
+        raise HTTPException(404, "job not found")
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/link/events")
+async def link_events(request: Request) -> StreamingResponse:
+    """SSE stream cho link jobs."""
+    lm = get_link_manager()
+    queue = lm.subscribe()
+
+    async def gen():
+        try:
+            snapshot = {
+                "type": "snapshot",
+                "max_concurrent": lm.max_concurrent,
+                "job_timeout": lm.job_timeout,
+                "jobs": lm.list_jobs(),
+            }
+            yield f"data: {json.dumps(snapshot)}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=5.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            lm.unsubscribe(queue)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Static UI
 # ─────────────────────────────────────────────────────────────────────
 
@@ -509,7 +647,8 @@ async def session_events(request: Request) -> StreamingResponse:
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
     html_path = _STATIC_DIR / "index.html"
-    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    html = html_path.read_text(encoding="utf-8").replace("__ASSET_VERSION__", _asset_version())
+    return HTMLResponse(html)
 
 
 # Mount static folder cho CSS/JS

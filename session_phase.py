@@ -126,10 +126,6 @@ async def _get_session_browser(
     )
     ctx = await cf.__aenter__()
     try:
-        # Suppress Playwright Firefox bug: pageError.location undefined crash
-        # (Playwright 1.60 + Camoufox — uncaught JS error thiếu location info)
-        ctx.on("pageerror", lambda _: None)
-
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
         # Step 1: bootstrap
@@ -330,3 +326,103 @@ def get_session_sync(
         proxy=proxy,
         log=log,
     ))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# HTTP-only session fetch (no browser) — dùng khi đã có cookies sẵn từ Phase 2.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _cookies_to_header(cookies: Any) -> str:
+    """Convert cookies (list[dict] | dict | None) → "name=value; name=value" string.
+
+    Hỗ trợ 2 format:
+      - list[dict]: Playwright/SignupResult format [{"name":..., "value":..., "domain":...}, ...]
+        → chỉ giữ cookies thuộc domain chatgpt.com (hoặc rỗng).
+      - dict: {name: value} flat.
+    """
+    if not cookies:
+        return ""
+    pairs: list[str] = []
+    if isinstance(cookies, list):
+        for c in cookies:
+            if not isinstance(c, dict):
+                continue
+            name = c.get("name")
+            value = c.get("value")
+            if not name or value is None:
+                continue
+            domain = (c.get("domain") or "").lstrip(".").lower()
+            # Chỉ giữ cookies dùng được cho chatgpt.com
+            if domain and "chatgpt.com" not in domain:
+                continue
+            pairs.append(f"{name}={value}")
+    elif isinstance(cookies, dict):
+        for name, value in cookies.items():
+            if value is None:
+                continue
+            pairs.append(f"{name}={value}")
+    return "; ".join(pairs)
+
+
+async def fetch_session_via_http(
+    *,
+    cookies: Any,
+    proxy: str | None = None,
+    timeout: float = 30.0,
+    impersonate: str = "chrome136",
+) -> dict[str, Any]:
+    """GET https://chatgpt.com/api/auth/session bằng curl_cffi với cookies có sẵn.
+
+    Args:
+        cookies: list[dict] (Playwright format) hoặc dict {name: value}.
+        proxy: HTTP/HTTPS proxy URL.
+        timeout: Request timeout (seconds).
+        impersonate: curl_cffi browser impersonation key.
+
+    Returns:
+        Full session JSON (dict) với accessToken không rỗng.
+
+    Raises:
+        SessionError: HTTP non-200, JSON parse fail, hoặc accessToken thiếu/rỗng.
+    """
+    from curl_cffi.requests import AsyncSession
+
+    cookie_header = _cookies_to_header(cookies)
+    if not cookie_header:
+        raise SessionError("không có cookie chatgpt.com để fetch session")
+
+    proxies = {"http": proxy, "https": proxy} if proxy else None
+    headers = {
+        "Cookie": cookie_header,
+        "Accept": "application/json",
+        "Referer": "https://chatgpt.com/",
+    }
+
+    async with AsyncSession(impersonate=impersonate, proxies=proxies) as sess:
+        try:
+            resp = await sess.get(
+                "https://chatgpt.com/api/auth/session",
+                headers=headers,
+                timeout=timeout,
+            )
+        except Exception as exc:
+            raise SessionError(f"network error: {exc}") from exc
+
+    if resp.status_code != 200:
+        body = (resp.text or "")[:200]
+        raise SessionError(f"HTTP {resp.status_code}: {body}")
+
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise SessionError(f"JSON parse fail: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise SessionError(f"response không phải JSON object: {type(data).__name__}")
+
+    token = data.get("accessToken")
+    if not isinstance(token, str) or not token.strip():
+        raise SessionError("accessToken thiếu hoặc rỗng")
+
+    return data

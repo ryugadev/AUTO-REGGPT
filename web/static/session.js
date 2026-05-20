@@ -58,14 +58,14 @@
       const s = l.trim();
       return s && !s.startsWith('#');
     });
-    dom.comboCount.textContent = `${lines.length} combo`;
+    dom.comboCount.textContent = `${lines.length} combo${lines.length === 1 ? '' : 's'}`;
   }
   dom.comboInput.addEventListener('input', updateComboCount);
 
   // ── Render job list ───────────────────────────────────────────────
   function renderJobs() {
     if (state.order.length === 0) {
-      dom.jobList.innerHTML = '<div class="empty">Paste combo + bấm Get Session.</div>';
+      dom.jobList.innerHTML = '<div class="empty">Paste combos and click Get Session.</div>';
       dom.jobSummary.textContent = '0 total';
       return;
     }
@@ -79,25 +79,27 @@
 
       let actionBtns = '';
       if (j.status === 'running') {
-        actionBtns = `<button class="icon-btn icon-danger" data-action="stop" data-id="${escHtml(id)}" title="Dừng"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg></button>`;
+        actionBtns = `<button class="icon-btn icon-danger" data-action="stop" data-id="${escHtml(id)}" title="Stop">${window.GptUi.icon('stop')}</button>`;
       } else if (j.status === 'success') {
         actionBtns = `
-          <button class="icon-btn" data-action="download" data-id="${escHtml(id)}" title="Download JSON"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
-          <button class="icon-btn" data-action="copy-json" data-id="${escHtml(id)}" title="Copy JSON"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></button>
-          <button class="icon-btn" data-action="copy-token" data-id="${escHtml(id)}" title="Copy Access Token"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 11-7.778 7.778 5.5 5.5 0 017.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg></button>
+          <button class="icon-btn" data-action="download" data-id="${escHtml(id)}" title="Download JSON">${window.GptUi.icon('download')}</button>
+          <button class="icon-btn" data-action="copy-json" data-id="${escHtml(id)}" title="Copy JSON">${window.GptUi.icon('copy')}</button>
+          <button class="icon-btn" data-action="copy-token" data-id="${escHtml(id)}" title="Copy access token">${window.GptUi.icon('token')}</button>
         `;
       } else {
-        actionBtns = `<button class="icon-btn" data-action="retry" data-id="${escHtml(id)}" title="Retry"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg></button>`;
+        actionBtns = `<button class="icon-btn" data-action="retry" data-id="${escHtml(id)}" title="Retry">${window.GptUi.icon('retry')}</button>`;
       }
 
       return `
         <div class="${cls}" data-id="${escHtml(id)}">
           <div class="job-status status-${escHtml(j.status)}">${escHtml(j.status)}</div>
-          <div class="job-email" title="${escHtml(j.email)}">${escHtml(j.email)}</div>
+          <div class="job-main">
+            <div class="job-email" title="${escHtml(j.email)}">${escHtml(j.email)}</div>
+          </div>
           <div class="job-duration">${escHtml(fmtDuration(j.duration))}</div>
           <div class="job-actions">
             ${actionBtns}
-            <button class="icon-btn icon-danger" data-action="remove" data-id="${escHtml(id)}" title="Xoá"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+            <button class="icon-btn icon-danger" data-action="remove" data-id="${escHtml(id)}" title="Remove">${window.GptUi.icon('remove')}</button>
           </div>
         </div>
       `;
@@ -107,8 +109,8 @@
     dom.jobSummary.textContent = [
       `${state.order.length} total`,
       stats.running ? `${stats.running} running` : '',
-      stats.success ? `${stats.success} ok` : '',
-      stats.error ? `${stats.error} err` : '',
+      stats.success ? `${stats.success} done` : '',
+      stats.error ? `${stats.error} failed` : '',
     ].filter(Boolean).join(' · ');
   }
 
@@ -130,7 +132,7 @@
     }
     dom.errorPane.textContent = errorLines.length
       ? errorLines.join('\n')
-      : 'Chưa có lỗi.';
+      : 'No errors yet.';
   }
 
   function loadSessionData(jobId) {
@@ -171,11 +173,11 @@
       const id = actionBtn.dataset.id;
       e.stopPropagation();
       if (action === 'retry') {
-        api(`/api/session/jobs/${id}/retry`, { method: 'POST' }).catch(alert);
+        api(`/api/session/jobs/${id}/retry`, { method: 'POST' }).catch((err) => alert(err.message));
       } else if (action === 'stop') {
-        api(`/api/session/jobs/${id}`, { method: 'DELETE' }).catch(alert);
+        api(`/api/session/jobs/${id}`, { method: 'DELETE' }).catch((err) => alert(err.message));
       } else if (action === 'remove') {
-        api(`/api/session/jobs/${id}`, { method: 'DELETE' }).catch(alert);
+        api(`/api/session/jobs/${id}`, { method: 'DELETE' }).catch((err) => alert(err.message));
       } else if (action === 'download' || action === 'copy-json' || action === 'copy-token') {
         // Lấy session data
         const cached = sessionCache.get(id);
@@ -187,7 +189,7 @@
               sessionCache.set(id, data.session_data);
               doSessionAction(action, id, data.session_data);
             }
-          }).catch(alert);
+          }).catch((err) => alert(err.message));
         }
       }
       return;
@@ -213,10 +215,10 @@
       a.click();
       URL.revokeObjectURL(url);
     } else if (action === 'copy-json') {
-      navigator.clipboard.writeText(JSON.stringify(sessionData, null, 2));
+      window.GptUi.copyText(JSON.stringify(sessionData, null, 2));
     } else if (action === 'copy-token') {
       if (sessionData.accessToken) {
-        navigator.clipboard.writeText(sessionData.accessToken);
+        window.GptUi.copyText(sessionData.accessToken);
       }
     }
   }
@@ -224,25 +226,21 @@
   // ── Run button ────────────────────────────────────────────────────
   dom.btnRun.addEventListener('click', async () => {
     const combos = dom.comboInput.value.trim();
-    if (!combos) { alert('Paste combo trước.'); return; }
+    if (!combos) { alert('Paste combos first.'); return; }
     dom.btnRun.disabled = true;
     try {
-      // Luôn sync config lên server trước khi chạy — đảm bảo session manager
-      // có đúng max_concurrent dù user không chủ động chuyển mode
-      const modeEl = document.getElementById('mode');
-      const target = modeEl && modeEl.value === 'single' ? 1 : 2;
-      const timeout = parseInt(dom.jobTimeout.value, 10) || 120;
+      // Sync config
+      const target = document.getElementById('mode').value === 'single' ? 1 : 2;
       await api('/api/session/config', {
         method: 'POST',
-        body: JSON.stringify({ max_concurrent: target, job_timeout: timeout }),
+        body: JSON.stringify({ max_concurrent: target }),
       });
-      state.maxConcurrent = target;
       await api('/api/session/jobs', {
         method: 'POST',
         body: JSON.stringify({ combos }),
       });
     } catch (err) {
-      alert('Lỗi: ' + err.message);
+      alert('Error: ' + err.message);
     } finally {
       dom.btnRun.disabled = false;
     }
@@ -278,7 +276,7 @@
 
   // ── Copy error button ──────────────────────────────────────────────
   dom.btnCopyError.addEventListener('click', () => {
-    navigator.clipboard.writeText(dom.errorPane.textContent);
+    window.GptUi.copyText(dom.errorPane.textContent);
   });
 
   // ── SSE ───────────────────────────────────────────────────────────
@@ -341,29 +339,9 @@
     };
   }
 
-  // ── Tab switching ─────────────────────────────────────────────────
-  document.querySelectorAll('.tab-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('.tab-btn').forEach((b) => b.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach((t) => t.classList.remove('active'));
-      btn.classList.add('active');
-      document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
-    });
-  });
-
   // ── Init ──────────────────────────────────────────────────────────
   updateComboCount();
   connectSSE();
-
-  // Sync maxConcurrent khi topbar mode thay đổi (shared selector)
-  const _modeSelect = document.getElementById('mode');
-  if (_modeSelect) {
-    _modeSelect.addEventListener('change', () => {
-      state.maxConcurrent = _modeSelect.value === 'single' ? 1 : 2;
-    });
-    // Init từ giá trị hiện tại
-    state.maxConcurrent = _modeSelect.value === 'single' ? 1 : 2;
-  }
 
   // Duration timer
   setInterval(() => {
