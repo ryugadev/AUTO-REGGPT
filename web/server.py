@@ -583,7 +583,7 @@ async def session_events(request: Request) -> StreamingResponse:
 class AddLinkJobsRequest(BaseModel):
     combos: str = Field(..., description="Input text — format depends on mode")
     mode: str = Field(default="combo", description="combo | session_json | access_token")
-    region: str = Field(default="VN", description="Region: VN | ID | IN | US")
+    region: str = Field(default="VN", description="Region: VN | ID | IN | US | BR")
 
 
 class SetLinkConfigRequest(BaseModel):
@@ -595,7 +595,7 @@ class SetLinkConfigRequest(BaseModel):
     )
     region: str | None = Field(
         default=None,
-        description="Region: VN | ID | IN | US",
+        description="Region: VN | ID | IN | US | BR",
     )
 
 

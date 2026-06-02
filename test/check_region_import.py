@@ -16,7 +16,8 @@ assert REGION_BILLING["VN"] == {"country": "VN", "currency": "VND"}
 assert REGION_BILLING["ID"] == {"country": "ID", "currency": "IDR"}
 assert REGION_BILLING["IN"] == {"country": "IN", "currency": "INR"}
 assert REGION_BILLING["US"] == {"country": "US", "currency": "USD"}
-assert len(REGION_BILLING) == 4
+assert REGION_BILLING["BR"] == {"country": "BR", "currency": "BRL"}
+assert len(REGION_BILLING) == 5
 
 # Check get_checkout_url signature accepts region
 import inspect

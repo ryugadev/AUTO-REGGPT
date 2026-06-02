@@ -75,6 +75,7 @@ REGION_BILLING: dict[str, dict[str, str]] = {
     "ID": {"country": "ID", "currency": "IDR"},
     "IN": {"country": "IN", "currency": "INR"},
     "US": {"country": "US", "currency": "USD"},
+    "BR": {"country": "BR", "currency": "BRL"},
 }
 DEFAULT_REGION = "VN"
 
