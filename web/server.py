@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .auth import get_token  # legacy — token auth disabled
-from .manager import get_manager, get_session_manager, get_link_manager
+from .manager import get_manager, get_session_manager, get_link_manager, get_checker_manager
 from .mail_modes import get_registry, serialize_for_api
 
 
@@ -128,7 +128,14 @@ async def add_jobs(payload: AddJobsRequest) -> JSONResponse:
             raise HTTPException(422, "email_logs_url must start with http:// or https://")
         worker_config = {"logs_url": url, "api_key": (payload.email_api_key or "").strip()}
 
-    combos = payload.combos.splitlines()
+    # Auto Gmail OTP: email thuê tự động → input rỗng hợp lệ (manager tạo 1 job).
+    if payload.mail_mode == "auto_gmail_otp":
+        combos = payload.combos.splitlines()
+    else:
+        combos = [line.strip() for line in (payload.combos or "").splitlines() if line.strip()]
+        if not combos:
+            raise HTTPException(422, "Combos cannot be empty")
+
     manager = get_manager()
     jobs = manager.add_jobs(
         combos,
@@ -206,9 +213,10 @@ async def set_config(payload: SetConfigRequest) -> JSONResponse:
             raise HTTPException(400, str(exc))
     if payload.proxy is not None:
         manager.set_proxy(payload.proxy)
-        # Lan proxy global sang Session + Link manager (single source of truth)
+        # Lan proxy global sang Session + Link + Checker manager (single source of truth)
         get_session_manager().set_proxy(payload.proxy)
         get_link_manager().set_proxy(payload.proxy)
+        get_checker_manager().set_proxy(payload.proxy)
     if payload.post_reg_get_session is not None:
         manager.set_post_reg_get_session(payload.post_reg_get_session)
     if payload.post_reg_get_link is not None:
@@ -396,6 +404,14 @@ async def on_shutdown():
         except Exception:
             pass
     lm._subscribers.clear()
+    # Checker manager cleanup
+    cm = get_checker_manager()
+    for q in list(cm._subscribers):
+        try:
+            q.put_nowait(None)
+        except Exception:
+            pass
+    cm._subscribers.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -725,6 +741,166 @@ async def link_events(request: Request) -> StreamingResponse:
             pass
         finally:
             lm.unsubscribe(queue)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Checker API (Check Live feature)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class AddCheckerJobsRequest(BaseModel):
+    combos: str = Field(..., description="Input text — format depends on mode")
+    mode: str = Field(default="combo", description="combo | session_json | access_token")
+
+
+class SetCheckerConfigRequest(BaseModel):
+    max_concurrent: int | None = Field(default=None, ge=1, le=10)
+    job_timeout: float | None = Field(default=None, ge=30, le=600)
+    proxy: str | None = Field(
+        default=None,
+        description="HTTP/HTTPS proxy URL. Empty string = direct.",
+    )
+
+
+@app.post("/api/checker/jobs")
+async def add_checker_jobs(payload: AddCheckerJobsRequest) -> JSONResponse:
+    mode = payload.mode
+    if mode not in ("combo", "session_json", "access_token"):
+        raise HTTPException(400, f"invalid mode: {mode}")
+    lines = payload.combos.splitlines()
+    cm = get_checker_manager()
+    jobs = cm.add_jobs(lines, mode=mode)  # type: ignore[arg-type]
+    return JSONResponse({"added": len(jobs), "jobs": [j.to_dict() for j in jobs]})
+
+
+@app.get("/api/checker/jobs")
+async def list_checker_jobs() -> JSONResponse:
+    cm = get_checker_manager()
+    return JSONResponse({
+        "max_concurrent": cm.max_concurrent,
+        "job_timeout": cm.job_timeout,
+        "proxy": cm.proxy,
+        "jobs": cm.list_jobs(),
+    })
+
+
+@app.get("/api/checker/config")
+async def get_checker_config() -> JSONResponse:
+    cm = get_checker_manager()
+    return JSONResponse({
+        "max_concurrent": cm.max_concurrent,
+        "job_timeout": cm.job_timeout,
+        "proxy": cm.proxy,
+    })
+
+
+@app.post("/api/checker/config")
+async def set_checker_config(payload: SetCheckerConfigRequest) -> JSONResponse:
+    cm = get_checker_manager()
+    if payload.max_concurrent is not None:
+        try:
+            cm.set_max_concurrent(payload.max_concurrent)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    if payload.job_timeout is not None:
+        try:
+            cm.set_job_timeout(payload.job_timeout)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    if payload.proxy is not None:
+        cm.set_proxy(payload.proxy)
+    return JSONResponse({
+        "max_concurrent": cm.max_concurrent,
+        "job_timeout": cm.job_timeout,
+        "proxy": cm.proxy,
+    })
+
+
+@app.post("/api/checker/jobs/stop-all")
+async def stop_all_checker_jobs() -> JSONResponse:
+    cm = get_checker_manager()
+    cancelled = cm.stop_all()
+    return JSONResponse({"cancelled": cancelled})
+
+
+@app.post("/api/checker/jobs/clear-finished")
+async def clear_finished_checker_jobs() -> JSONResponse:
+    cm = get_checker_manager()
+    removed = cm.clear_finished()
+    return JSONResponse({"removed": removed})
+
+
+@app.get("/api/checker/jobs/{job_id}")
+async def get_checker_job(job_id: str) -> JSONResponse:
+    cm = get_checker_manager()
+    data = cm.get_job(job_id)
+    if data is None:
+        raise HTTPException(404, "job not found")
+    return JSONResponse(data)
+
+
+@app.post("/api/checker/jobs/{job_id}/retry")
+async def retry_checker_job(job_id: str) -> JSONResponse:
+    cm = get_checker_manager()
+    job = cm.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.status != "error":
+        raise HTTPException(400, "job is not in error status")
+    cm.retry_job(job_id)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/checker/jobs/{job_id}")
+async def delete_checker_job(job_id: str) -> JSONResponse:
+    cm = get_checker_manager()
+    ok = cm.remove_job(job_id)
+    if not ok:
+        raise HTTPException(404, "job not found")
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/checker/events")
+async def checker_events(request: Request) -> StreamingResponse:
+    """SSE stream cho checker jobs."""
+    cm = get_checker_manager()
+    queue = cm.subscribe()
+
+    async def gen():
+        try:
+            snapshot = {
+                "type": "snapshot",
+                "max_concurrent": cm.max_concurrent,
+                "job_timeout": cm.job_timeout,
+                "proxy": cm.proxy,
+                "jobs": cm.list_jobs(),
+            }
+            yield f"data: {json.dumps(snapshot)}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=5.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            cm.unsubscribe(queue)
 
     return StreamingResponse(
         gen(),

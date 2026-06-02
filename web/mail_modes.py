@@ -68,6 +68,8 @@ def _build_outlook_request(
         email=parsed.email,
         mail_provider="outlook",
         outlook_combo=parsed.raw,
+        otp_timeout_seconds=240.0,
+        otp_poll_interval_seconds=3.0,
         headless=headless,
         keep_browser_open=keep_browser_open,
         password=password,
@@ -220,6 +222,55 @@ GMAIL_ADVANCED_MODE = MailModeSpec(
 )
 
 
+# ─── Auto Gmail OTP mode ──────────────────────────────────────────────
+
+
+# Placeholder email cho job được tạo trước khi pre_check resolve email thật.
+AUTO_GMAIL_OTP_PENDING_EMAIL = "pending@auto-gmail-otp.local"
+
+
+def _parse_auto_gmail_otp_line(line: str) -> ParsedLine:
+    """Auto Gmail OTP: nội dung dòng bị bỏ qua, email được thuê tự động.
+
+    Mỗi dòng (kể cả placeholder rỗng do manager đẩy vào) → 1 job pending.
+    """
+    return ParsedLine(email=AUTO_GMAIL_OTP_PENDING_EMAIL, raw=line)
+
+
+def _build_auto_gmail_otp_request(
+    parsed: ParsedLine,
+    *,
+    worker_config: dict[str, str] | None = None,
+    password: str | None = None,
+    headless: bool = True,
+    keep_browser_open: bool = False,
+    proxy: str | None = None,
+) -> SignupRequest:
+    from ..config import env_insecure_tls
+    return SignupRequest(
+        email=AUTO_GMAIL_OTP_PENDING_EMAIL,  # pre_check sẽ resolve email thật
+        mail_provider="auto_gmail_otp",
+        otp_timeout_seconds=300.0,
+        otp_poll_interval_seconds=4.0,
+        headless=headless,
+        keep_browser_open=keep_browser_open,
+        password=password,
+        proxy=proxy,
+        tls_insecure=env_insecure_tls(),
+    )
+
+
+AUTO_GMAIL_OTP_MODE = MailModeSpec(
+    id="auto_gmail_otp",
+    label="Auto Gmail OTP",
+    input_placeholder="Để trống để thuê 1 Gmail OTP tự động, hoặc nhập nhiều dòng để chạy nhiều job.",
+    input_help="Email được thuê tự động qua API. Cần SHOPGMAIL_API_KEY + SHOPGMAIL_OTP_SERVICE trong .env.",
+    config_schema=[],
+    parse_line=_parse_auto_gmail_otp_line,
+    build_request=_build_auto_gmail_otp_request,
+)
+
+
 # ─── Registry ─────────────────────────────────────────────────────────
 
 
@@ -227,6 +278,7 @@ _REGISTRY: dict[str, MailModeSpec] = {
     OUTLOOK_MODE.id: OUTLOOK_MODE,
     WORKER_MODE.id: WORKER_MODE,
     GMAIL_ADVANCED_MODE.id: GMAIL_ADVANCED_MODE,
+    AUTO_GMAIL_OTP_MODE.id: AUTO_GMAIL_OTP_MODE,
 }
 
 

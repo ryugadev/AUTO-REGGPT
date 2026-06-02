@@ -144,6 +144,11 @@
         `<button class="icon-btn icon-danger" data-action="remove" data-id="${escHtml(id)}" title="Remove">${window.GptUi.icon('remove')}</button>`,
       );
 
+      let statusText = escHtml(job.status);
+      if (job.status === 'success' && job.promo_eligible) {
+        statusText += ` ${escHtml(job.promo_eligible)}`;
+      }
+
       const meta = job.payment_link
         ? `<div class="job-meta" title="${escHtml(job.payment_link)}">${escHtml(job.payment_link)}</div>`
         : '';
@@ -153,7 +158,7 @@
       return `
         <div class="${cls}" data-id="${escHtml(id)}">
           <div class="job-index">${idx + 1}</div>
-          <div class="job-status status-${escHtml(job.status)}">${escHtml(job.status)}</div>
+          <div class="job-status status-${escHtml(job.status)}">${statusText}</div>
           <div class="job-main">
             <div class="job-email" title="${escHtml(job.email)}">${modeTag}${escHtml(job.email)}</div>
             ${meta}
@@ -295,6 +300,19 @@
 
     dom.btnRun.disabled = true;
     try {
+      // Sync concurrency theo Mode dropdown global (#mode): single=1, multi=2.
+      const modeEl = document.getElementById('mode');
+      const target = (modeEl && modeEl.value === 'single') ? 1 : 2;
+      try {
+        await api('/api/link/config', {
+          method: 'POST',
+          body: JSON.stringify({ max_concurrent: target }),
+        });
+        state.maxConcurrent = target;
+      } catch (err) {
+        console.error('link config sync failed:', err);
+      }
+
       await api('/api/link/jobs', {
         method: 'POST',
         body: JSON.stringify({ combos, mode: state.mode, region: state.region }),

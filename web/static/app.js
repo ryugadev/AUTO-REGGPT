@@ -98,6 +98,10 @@
       input_help: 'Mỗi dòng: api_url hoặc email|api_url. Pre-check mail_status=live.',
       input_placeholder: 'https://checkotpgmail.live/otp/...\nbrandonspencer7424@gmail.com|https://checkotpgmail.live/otp/...',
     },
+    auto_gmail_otp: {
+      input_help: 'Email thuê tự động qua API. Cần SHOPGMAIL_API_KEY + SHOPGMAIL_OTP_SERVICE trong .env.',
+      input_placeholder: 'Để trống để thuê 1 Gmail OTP tự động, hoặc nhập nhiều dòng để chạy nhiều job.',
+    },
   });
 
   function fmtDuration(secs) {
@@ -132,10 +136,41 @@
   }
 
   function copyText(text) {
-    return navigator.clipboard.writeText(text).catch(() => {
-      alert('Copy failed.');
+    return navigator.clipboard.writeText(text).then(() => {
+      showToast('Copied to clipboard', 'success');
+    }).catch(() => {
+      showToast('Copy failed', 'error');
       throw new Error('copy failed');
     });
+  }
+
+  // ── Toast notifications (vanilla, no deps) ───────────────────────
+  function _toastHost() {
+    let host = document.getElementById('toast-host');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'toast-host';
+      host.className = 'toast-host';
+      document.body.appendChild(host);
+    }
+    return host;
+  }
+
+  function showToast(message, type = 'info', timeout = 2600) {
+    const host = _toastHost();
+    const el = document.createElement('div');
+    el.className = `toast toast-${type}`;
+    el.setAttribute('role', 'status');
+    el.textContent = message;
+    host.appendChild(el);
+    // trigger transition
+    requestAnimationFrame(() => el.classList.add('show'));
+    const remove = () => {
+      el.classList.remove('show');
+      setTimeout(() => el.remove(), 320);
+    };
+    setTimeout(remove, timeout);
+    el.addEventListener('click', remove);
   }
 
   function activateTab(tabId) {
@@ -161,6 +196,7 @@
   window.GptUi = Object.assign(window.GptUi || {}, {
     icon,
     copyText,
+    showToast,
     activateTab,
     initTabs,
     getAuthToken,
@@ -186,7 +222,7 @@
       return;
     }
 
-    const stats = { queued: 0, running: 0, success: 0, error: 0, cancelled: 0 };
+    const stats = { queued: 0, running: 0, success: 0, error: 0, soldout: 0, registered: 0, cancelled: 0 };
     const html = state.order.map((id, idx) => {
       const j = state.jobs.get(id);
       if (!j) return '';
@@ -203,10 +239,18 @@
       if (j.payment_link) {
         postRegBtns += `<button class="icon-btn" data-action="copy-link" data-id="${escHtml(id)}" title="Copy payment link">${icon('link')}</button>`;
       }
+      let statusText = escHtml(j.status);
+      if (j.status === 'success' && j.promo_eligible) {
+        statusText += ` ${escHtml(j.promo_eligible)}`;
+      } else if (j.status === 'soldout') {
+        statusText = 'SoldOut';
+      } else if (j.status === 'registered') {
+        statusText = 'Registered';
+      }
       return `
         <div class="${cls}" data-id="${escHtml(id)}">
           <div class="job-index">${idx + 1}</div>
-          <div class="job-status status-${escHtml(j.status)}">${escHtml(j.status)}</div>
+          <div class="job-status status-${escHtml(j.status)}">${statusText}</div>
           <div class="job-main">
             <div class="job-email" title="${escHtml(j.email)}">${escHtml(j.email)}<span class="badge-mode badge-mode-${escHtml(j.mail_mode || 'outlook')}">${escHtml(j.mail_mode || 'outlook')}</span></div>
           </div>
@@ -227,6 +271,8 @@
       stats.queued  ? `${stats.queued} queued`   : '',
       stats.success ? `${stats.success} done`    : '',
       stats.error   ? `${stats.error} failed`    : '',
+      stats.soldout ? `${stats.soldout} soldout` : '',
+      stats.registered ? `${stats.registered} registered` : '',
     ].filter(Boolean).join(' · ');
 
     updateStatusPill(stats);
@@ -291,7 +337,13 @@
       const password = sec.password || '';
       const secret = sec.secret || '';
       if (j.status === 'success' && secret) {
-        successLines.push(`${j.email}|${password}|${secret}`);
+        let suffix = '';
+        if (j.promo_eligible === 'Yes') {
+          suffix = '|Yes Promo';
+        } else if (j.promo_eligible === 'No') {
+          suffix = '|No Promo';
+        }
+        successLines.push(`${j.email}|${password}|${secret}${suffix}`);
       } else if (j.status === 'error') {
         // Signup OK nhưng 2FA fail (job.has_password=true, has_secret=false) → vẫn xuất
         if (password) {
@@ -397,7 +449,8 @@
   // ── Run button ───────────────────────────────────────────────────
   dom.btnRun.addEventListener('click', async () => {
     const combos = dom.comboInput.value.trim();
-    if (!combos) {
+    const isAutoGmail = state.currentMailMode === 'auto_gmail_otp';
+    if (!combos && !isAutoGmail) {
       alert('Paste combos first.');
       return;
     }
@@ -429,8 +482,9 @@
         method: 'POST',
         body: JSON.stringify(payload),
       });
+      showToast('Jobs started', 'success');
     } catch (err) {
-      alert('Error: ' + err.message);
+      showToast('Error: ' + err.message, 'error');
     } finally {
       dom.btnRun.disabled = false;
       validateWorkerConfig();
@@ -440,6 +494,7 @@
   dom.btnClearInput.addEventListener('click', () => {
     dom.comboInput.value = '';
     updateComboCount();
+    showToast('Input cleared', 'info');
   });
 
   dom.btnStopAll.addEventListener('click', async () => {
@@ -447,8 +502,9 @@
     try {
       const res = await api('/api/jobs/stop-all', { method: 'POST' });
       console.log('stopped:', res.stopped);
+      showToast(`Stopped ${res.stopped} job(s)`, 'warn');
     } catch (err) {
-      alert('Error: ' + err.message);
+      showToast('Error: ' + err.message, 'error');
     }
   });
 
@@ -457,8 +513,9 @@
       const res = await api('/api/jobs/clear-finished', { method: 'POST' });
       // Refresh list (SSE sẽ broadcast clear_finished event)
       console.log('cleared:', res.removed);
+      showToast(`Cleared ${res.removed} finished job(s)`, 'info');
     } catch (err) {
-      alert('Error: ' + err.message);
+      showToast('Error: ' + err.message, 'error');
     }
   });
 

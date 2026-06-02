@@ -17,6 +17,7 @@
     <button class="tab-btn active" data-tab="reg">Reg</button>
     <button class="tab-btn" data-tab="session">Get Session</button>
     <button class="tab-btn" data-tab="link">Get Link</button>
+    <button class="tab-btn" data-tab="checker">Check Live</button>
   </nav>
   <div class="topbar-actions">
     <label class="select-wrap">
@@ -67,7 +68,7 @@
 <main class="grid tab-content active" id="tab-reg">
   <section class="card card-input">
     <header class="card-head">
-      <h2>Input Combos</h2>
+      <h2>Registration Input</h2>
       <span class="muted card-head-note" id="input-hint">One combo per line: email|password|refresh_token|client_id</span>
     </header>
     <!-- Mail Mode + Worker config: 1 row, label trên / control dưới -->
@@ -152,7 +153,7 @@
 <main class="grid tab-content" id="tab-session">
   <section class="card card-input">
     <header class="card-head">
-      <h2>Input</h2>
+      <h2>Session Input</h2>
       <span class="muted card-head-note">One line per combo: email|password|2fa_secret</span>
     </header>
     <textarea class="combo-textarea" id="ses-combo-input" placeholder="email@hotmail.com|password123|DNPARKKMM5EYOPDG...&#10;email2@hotmail.com|pass456|I77PEBZQNEBE67SU..."></textarea>
@@ -204,7 +205,7 @@
 <main class="grid tab-content" id="tab-link">
   <section class="card card-input">
     <header class="card-head">
-      <h2>Input</h2>
+      <h2>Payment Link Input</h2>
       <div class="link-mode-tabs">
         <button class="link-mode-btn active" data-mode="combo">Combo</button>
         <button class="link-mode-btn" data-mode="session_json">Session JSON</button>
@@ -268,8 +269,84 @@
   </section>
 </main>
 
+<!-- ════════════════ TAB: CHECK PLAN / CHECK LIVE ════════════════ -->
+<main class="grid tab-content" id="tab-checker">
+  <section class="card card-input">
+    <header class="card-head">
+      <h2>Live Check Input</h2>
+      <div class="checker-mode-tabs link-mode-tabs">
+        <button class="checker-mode-btn link-mode-btn active" data-mode="combo">Combo</button>
+        <button class="checker-mode-btn link-mode-btn" data-mode="session_json">Session JSON</button>
+        <button class="checker-mode-btn link-mode-btn" data-mode="access_token">Access Token</button>
+      </div>
+    </header>
+    <span class="muted card-head-note" id="checker-mode-hint">One line per combo: email|password|2fa_secret</span>
+    <textarea class="combo-textarea" id="checker-combo-input" placeholder="email@hotmail.com|password123|DNPARKKMM5EYOPDG...&#10;email2@outlook.com|pass456|I77PEBZQNEBE67SU..." maxlength="50000"></textarea>
+    <div class="card-settings">
+      <div class="card-settings-row card-settings-row-mixed">
+        <label class="input-group settings-field-compact">
+          <span class="input-label">Timeout (s/job)</span>
+          <input type="number" id="checker-job-timeout" value="180" min="30" max="600" step="10" />
+        </label>
+      </div>
+    </div>
+    <div class="card-actions">
+      <button id="checker-btn-run" class="btn btn-primary">Check Live</button>
+      <button id="checker-btn-stop-all" class="btn btn-danger">Stop All</button>
+      <button id="checker-btn-clear-input" class="btn btn-ghost">Clear Input</button>
+      <span class="muted" id="checker-combo-count">0 items</span>
+    </div>
+  </section>
+
+  <section class="card card-jobs">
+    <header class="card-head">
+      <h2>Jobs</h2>
+      <div class="card-head-actions">
+        <button id="checker-btn-clear-done" class="btn btn-ghost btn-small">Clear Done</button>
+        <span class="muted" id="checker-job-summary">0 total</span>
+      </div>
+    </header>
+    <div id="checker-job-list" class="job-list">
+      <div class="empty">Paste input and click Check Live.</div>
+    </div>
+  </section>
+
+  <section class="card card-log">
+    <header class="card-head">
+      <h2>Log</h2>
+      <span class="muted" id="checker-log-target">—</span>
+    </header>
+    <pre id="checker-log-pane" class="log-pane"></pre>
+  </section>
+
+  <section class="card card-success card-span-full">
+    <header class="card-head">
+      <h2>Live Plus</h2>
+      <button id="checker-btn-copy-plus" class="btn btn-ghost btn-small">Copy All</button>
+    </header>
+    <pre id="checker-plus-pane" class="output-pane">No Live Plus accounts yet.</pre>
+  </section>
+
+  <section class="card card-success card-span-full">
+    <header class="card-head">
+      <h2>Live Free</h2>
+      <button id="checker-btn-copy-free" class="btn btn-ghost btn-small">Copy All</button>
+    </header>
+    <pre id="checker-free-pane" class="output-pane">No Live Free accounts yet.</pre>
+  </section>
+
+  <section class="card card-error card-span-full">
+    <header class="card-head">
+      <h2>Error / Die</h2>
+      <button id="checker-btn-copy-error" class="btn btn-ghost btn-small">Copy All</button>
+    </header>
+    <pre id="checker-error-pane" class="output-pane">No errors yet.</pre>
+  </section>
+</main>
+
 <script src="/static/app.js?v=__ASSET_VERSION__"></script>
 <script src="/static/session.js?v=__ASSET_VERSION__"></script>
 <script src="/static/link.js?v=__ASSET_VERSION__"></script>
+<script src="/static/checker.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

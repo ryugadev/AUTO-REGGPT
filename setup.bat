@@ -21,7 +21,7 @@ echo.
 REM 1. Python venv trong chính package
 if not exist ".venv" (
     echo [1/6] Creating .venv...
-    python -m venv .venv
+    py -3.12 -m venv .venv
 ) else (
     echo [1/6] .venv exists √
 )
