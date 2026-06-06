@@ -231,6 +231,165 @@
     activateTab(initialTab);
   }
 
+  // ── Number ticker (animation số đếm) ────────────────────────────
+  // Khi 1 element có class .num-ticker đổi nội dung, gọi bumpTicker(el) để
+  // chạy animation pulse. Hoặc tự gắn vào element bằng setTickerValue(el, val).
+  function bumpTicker(el) {
+    if (!el) return;
+    el.classList.remove('bump');
+    void el.offsetWidth;  // force reflow
+    el.classList.add('bump');
+    setTimeout(() => el.classList.remove('bump'), 320);
+  }
+
+  function setTickerValue(el, val) {
+    if (!el) return;
+    const cur = el.textContent;
+    const next = String(val);
+    if (cur === next) return;
+    el.textContent = next;
+    bumpTicker(el);
+  }
+
+  // ── Command Palette (Ctrl/Cmd + K) ───────────────────────────────
+  const _cmdkCommands = [
+    { id: 'tab:reg',      label: 'Go to · Reg',          group: 'Navigation', kbd: '1', action: () => activateTab('reg') },
+    { id: 'tab:session',  label: 'Go to · Get Session',  group: 'Navigation', kbd: '2', action: () => activateTab('session') },
+    { id: 'tab:link',     label: 'Go to · Get Link',     group: 'Navigation', kbd: '3', action: () => activateTab('link') },
+    { id: 'tab:checker',  label: 'Go to · Check Live',   group: 'Navigation', kbd: '4', action: () => activateTab('checker') },
+    { id: 'tab:autocdk',  label: 'Go to · Auto CDK',     group: 'Navigation', kbd: '5', action: () => activateTab('autocdk') },
+    { id: 'tab:cdkcheck', label: 'Go to · Check CDK',    group: 'Navigation', kbd: '6', action: () => activateTab('cdkcheck') },
+    { id: 'mode:single',  label: 'Set mode · Single',    group: 'Settings',
+      action: () => { const m = document.getElementById('mode'); if (m) { m.value = 'single'; m.dispatchEvent(new Event('change', {bubbles:true})); } } },
+    { id: 'mode:multi',   label: 'Set mode · Multi',     group: 'Settings',
+      action: () => { const m = document.getElementById('mode'); if (m) { m.value = 'multi'; m.dispatchEvent(new Event('change', {bubbles:true})); } } },
+    { id: 'headless:on',  label: 'Toggle Headless',      group: 'Settings',
+      action: () => { const t = document.getElementById('headless-toggle'); if (t) { t.click(); } } },
+    { id: 'debug:on',     label: 'Toggle Debug',         group: 'Settings',
+      action: () => { const t = document.getElementById('debug-toggle'); if (t) { t.click(); } } },
+  ];
+
+  let _cmdkBound = false;
+  function _ensureCmdkDom() {
+    if (document.getElementById('cmdk-modal')) return;
+    const backdrop = document.createElement('div');
+    backdrop.className = 'cmdk-backdrop';
+    backdrop.id = 'cmdk-backdrop';
+
+    const modal = document.createElement('div');
+    modal.className = 'cmdk-modal';
+    modal.id = 'cmdk-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-label', 'Command Palette');
+    modal.innerHTML = `
+      <input id="cmdk-input" class="cmdk-input" type="text" placeholder="Type a command or search…" autocomplete="off" spellcheck="false" />
+      <div id="cmdk-list" class="cmdk-list"></div>
+    `;
+    document.body.appendChild(backdrop);
+    document.body.appendChild(modal);
+
+    backdrop.addEventListener('click', closeCmdk);
+  }
+
+  function _renderCmdkList(filter = '') {
+    const list = document.getElementById('cmdk-list');
+    if (!list) return;
+    const q = filter.trim().toLowerCase();
+    const items = q
+      ? _cmdkCommands.filter(c => c.label.toLowerCase().includes(q) || (c.group || '').toLowerCase().includes(q))
+      : _cmdkCommands;
+    if (items.length === 0) {
+      list.innerHTML = `<div class="cmdk-item" style="color: var(--text-soft); cursor: default;">No commands match "${escHtml(filter)}"</div>`;
+      return;
+    }
+    list.innerHTML = items.map((c, i) => `
+      <div class="cmdk-item${i === 0 ? ' is-active' : ''}" data-id="${escHtml(c.id)}">
+        <span class="cmdk-item-icon">›</span>
+        <span>${escHtml(c.label)}</span>
+        ${c.kbd ? `<span class="cmdk-item-kbd">${escHtml(c.kbd)}</span>` : ''}
+      </div>
+    `).join('');
+    list.querySelectorAll('.cmdk-item[data-id]').forEach(el => {
+      el.addEventListener('mouseenter', () => {
+        list.querySelectorAll('.cmdk-item.is-active').forEach(a => a.classList.remove('is-active'));
+        el.classList.add('is-active');
+      });
+      el.addEventListener('click', () => {
+        const cmd = _cmdkCommands.find(c => c.id === el.dataset.id);
+        if (cmd) { cmd.action(); closeCmdk(); }
+      });
+    });
+  }
+
+  function openCmdk() {
+    _ensureCmdkDom();
+    const backdrop = document.getElementById('cmdk-backdrop');
+    const modal = document.getElementById('cmdk-modal');
+    const input = document.getElementById('cmdk-input');
+    if (!backdrop || !modal || !input) return;
+    backdrop.classList.add('show');
+    modal.classList.add('show');
+    input.value = '';
+    _renderCmdkList('');
+    setTimeout(() => input.focus(), 30);
+  }
+
+  function closeCmdk() {
+    const backdrop = document.getElementById('cmdk-backdrop');
+    const modal = document.getElementById('cmdk-modal');
+    if (backdrop) backdrop.classList.remove('show');
+    if (modal) modal.classList.remove('show');
+  }
+
+  function _isCmdkOpen() {
+    const m = document.getElementById('cmdk-modal');
+    return m && m.classList.contains('show');
+  }
+
+  function initCmdPalette() {
+    if (_cmdkBound) return;
+    _cmdkBound = true;
+    // Click vào nút ⌘K trong topbar
+    const trigger = document.getElementById('cmdk-trigger');
+    if (trigger) trigger.addEventListener('click', openCmdk);
+    document.addEventListener('keydown', (e) => {
+      const isMod = e.metaKey || e.ctrlKey;
+      // Ctrl/Cmd + K → open
+      if (isMod && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        if (_isCmdkOpen()) closeCmdk(); else openCmdk();
+        return;
+      }
+      if (!_isCmdkOpen()) return;
+      if (e.key === 'Escape') { e.preventDefault(); closeCmdk(); return; }
+      const list = document.getElementById('cmdk-list');
+      const items = list ? list.querySelectorAll('.cmdk-item[data-id]') : [];
+      if (!items.length) return;
+      const active = list.querySelector('.cmdk-item.is-active');
+      let idx = Array.prototype.indexOf.call(items, active);
+      if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(items.length - 1, idx + 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(0, idx - 1); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        const el = items[Math.max(0, idx)];
+        if (el) {
+          const cmd = _cmdkCommands.find(c => c.id === el.dataset.id);
+          if (cmd) { cmd.action(); closeCmdk(); }
+        }
+        return;
+      } else { return; }
+      items.forEach(el => el.classList.remove('is-active'));
+      items[idx].classList.add('is-active');
+      items[idx].scrollIntoView({ block: 'nearest' });
+    });
+    // Input filter
+    document.addEventListener('input', (e) => {
+      if (e.target && e.target.id === 'cmdk-input') {
+        _renderCmdkList(e.target.value);
+      }
+    });
+  }
+
   window.GptUi = Object.assign(window.GptUi || {}, {
     icon,
     copyText,
@@ -240,6 +399,10 @@
     registerTabSSE,
     getAuthToken,
     authEventSource,
+    bumpTicker,
+    setTickerValue,
+    openCmdk,
+    closeCmdk,
   });
 
   // ── Combo counter ─────────────────────────────────────────────────
@@ -1048,6 +1211,7 @@
     window.GptUi.registerTabSSE('reg', connectSSE);
   }
   initTabs();
+  initCmdPalette();
   updateComboCount();
   bootstrapMailModes();
 
