@@ -1163,6 +1163,7 @@ async def run_browser_phase(
             screen=fixed_screen,
             ignore_https_errors=request.tls_insecure,
             config=extra_config,
+            i_know_what_im_doing=True,
             **proxy_kwargs,
             **har_kwargs,
         )

@@ -18,6 +18,8 @@
     <button class="tab-btn" data-tab="session">Get Session</button>
     <button class="tab-btn" data-tab="link">Get Link</button>
     <button class="tab-btn" data-tab="checker">Check Live</button>
+    <button class="tab-btn" data-tab="autocdk">Auto CDK</button>
+    <button class="tab-btn" data-tab="cdkcheck">Check CDK</button>
   </nav>
   <div class="topbar-actions">
     <label class="select-wrap">
@@ -345,9 +347,148 @@
   </section>
 </main>
 
+<!-- ════════════════ TAB: AUTO CDK ════════════════ -->
+<main class="grid tab-content" id="tab-autocdk">
+  <section class="card card-input">
+    <header class="card-head">
+      <h2>Auto CDK Input</h2>
+      <div class="autocdk-mode-tabs link-mode-tabs">
+        <button class="autocdk-mode-btn link-mode-btn active" data-mode="combo">Combo</button>
+        <button class="autocdk-mode-btn link-mode-btn" data-mode="access_token">Access Token</button>
+      </div>
+    </header>
+    <div class="two-col-textareas">
+      <div class="textarea-col">
+        <span class="input-label" id="autocdk-combo-label">Combos (email|pass|2fa)</span>
+        <textarea id="autocdk-combo-input" placeholder="email1@hotmail.com|pwd1|2FA_SECRET1&#10;email2@outlook.com|pwd2|2FA_SECRET2"></textarea>
+      </div>
+      <div class="textarea-col">
+        <span class="input-label">CDK Keys</span>
+        <textarea id="autocdk-keys-input" placeholder="BX-XXXXXXXX1&#10;BX-XXXXXXXX2"></textarea>
+      </div>
+    </div>
+    <div class="card-settings">
+      <div class="card-settings-row card-settings-row-mixed">
+        <label class="input-group settings-field-compact">
+          <span class="input-label">Timeout (s/job)</span>
+          <input type="number" id="autocdk-job-timeout" value="180" min="30" max="600" step="10" />
+        </label>
+      </div>
+    </div>
+    <div class="card-actions">
+      <button id="autocdk-btn-run" class="btn btn-primary">Run Auto CDK</button>
+      <button id="autocdk-btn-stop-all" class="btn btn-danger">Stop All</button>
+      <button id="autocdk-btn-clear-input" class="btn btn-ghost">Clear Input</button>
+      <span class="muted" id="autocdk-combo-count">0 items</span>
+    </div>
+  </section>
+
+  <section class="card card-jobs">
+    <header class="card-head">
+      <h2>Jobs</h2>
+      <div class="card-head-actions">
+        <button id="autocdk-btn-clear-done" class="btn btn-ghost btn-small">Clear Done</button>
+        <span class="muted" id="autocdk-job-summary">0 total</span>
+      </div>
+    </header>
+    <div id="autocdk-job-list" class="job-list">
+      <div class="empty">Paste inputs and click Run Auto CDK.</div>
+    </div>
+  </section>
+
+  <section class="card card-log">
+    <header class="card-head">
+      <h2>Log</h2>
+      <span class="muted" id="autocdk-log-target">—</span>
+    </header>
+    <pre id="autocdk-log-pane" class="log-pane"></pre>
+  </section>
+
+  <section class="card card-success card-span-full">
+    <header class="card-head">
+      <h2>Upgraded Accounts (PLUS)</h2>
+      <button id="autocdk-btn-copy-success" class="btn btn-ghost btn-small">Copy All</button>
+    </header>
+    <pre id="autocdk-success-pane" class="output-pane">No upgraded accounts yet.</pre>
+  </section>
+
+  <section class="card card-error card-span-full">
+    <header class="card-head">
+      <h2>Failed / Errors</h2>
+      <button id="autocdk-btn-copy-error" class="btn btn-ghost btn-small">Copy All</button>
+    </header>
+    <pre id="autocdk-error-pane" class="output-pane">No errors yet.</pre>
+  </section>
+</main>
+
+<!-- ════════════════ TAB: CHECK CDK ════════════════ -->
+<main class="grid tab-content" id="tab-cdkcheck">
+  <section class="card card-input">
+    <header class="card-head">
+      <h2>Check CDK Input</h2>
+      <span class="muted card-head-note">Mỗi dòng 1 CDK key (vd: BX-XXXXXXXX)</span>
+    </header>
+    <textarea class="combo-textarea" id="cdkcheck-keys-input" placeholder="BX-XXXXXXXX1&#10;BX-XXXXXXXX2&#10;BX-XXXXXXXX3"></textarea>
+    <div class="card-settings">
+      <div class="card-settings-row card-settings-row-mixed">
+        <label class="input-group settings-field-compact">
+          <span class="input-label">Timeout (s/job)</span>
+          <input type="number" id="cdkcheck-job-timeout" value="60" min="10" max="600" step="10" />
+        </label>
+      </div>
+    </div>
+    <div class="card-actions">
+      <button id="cdkcheck-btn-run" class="btn btn-primary">Check CDK</button>
+      <button id="cdkcheck-btn-stop-all" class="btn btn-danger">Stop All</button>
+      <button id="cdkcheck-btn-clear-input" class="btn btn-ghost">Clear Input</button>
+      <span class="muted" id="cdkcheck-combo-count">0 keys</span>
+    </div>
+  </section>
+
+  <section class="card card-jobs">
+    <header class="card-head">
+      <h2>Jobs</h2>
+      <div class="card-head-actions">
+        <button id="cdkcheck-btn-clear-done" class="btn btn-ghost btn-small">Clear Done</button>
+        <button id="cdkcheck-btn-clear-cancelled" class="btn btn-ghost btn-small">Clear Cancelled</button>
+        <span class="muted" id="cdkcheck-job-summary">0 total</span>
+      </div>
+    </header>
+    <div id="cdkcheck-job-list" class="job-list">
+      <div class="empty">Paste CDK keys and click Check CDK.</div>
+    </div>
+  </section>
+
+  <section class="card card-log">
+    <header class="card-head">
+      <h2>Log</h2>
+      <span class="muted" id="cdkcheck-log-target">—</span>
+    </header>
+    <pre id="cdkcheck-log-pane" class="log-pane"></pre>
+  </section>
+
+  <section class="card card-success">
+    <header class="card-head">
+      <h2>Live CDK <span class="muted" id="cdkcheck-live-count"></span></h2>
+      <button id="cdkcheck-btn-copy-live" class="btn btn-ghost btn-small">Copy All</button>
+    </header>
+    <pre id="cdkcheck-live-pane" class="output-pane">No live CDK yet.</pre>
+  </section>
+
+  <section class="card card-error">
+    <header class="card-head">
+      <h2>Dead / Error CDK <span class="muted" id="cdkcheck-dead-count"></span></h2>
+      <button id="cdkcheck-btn-copy-dead" class="btn btn-ghost btn-small">Copy All</button>
+    </header>
+    <pre id="cdkcheck-dead-pane" class="output-pane">No dead CDK yet.</pre>
+  </section>
+</main>
+
 <script src="/static/app.js?v=__ASSET_VERSION__"></script>
 <script src="/static/session.js?v=__ASSET_VERSION__"></script>
 <script src="/static/link.js?v=__ASSET_VERSION__"></script>
 <script src="/static/checker.js?v=__ASSET_VERSION__"></script>
+<script src="/static/autocdk.js?v=__ASSET_VERSION__"></script>
+<script src="/static/cdkcheck.js?v=__ASSET_VERSION__"></script>
 </body>
 </html>

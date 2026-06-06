@@ -128,6 +128,9 @@
       const actions = [];
       if (job.payment_link) {
         actions.push(
+          `<button class="icon-btn icon-play" data-action="play-qr" data-id="${escHtml(id)}" title="Play/Show QR Code">${window.GptUi.icon('play')}</button>`,
+        );
+        actions.push(
           `<button class="icon-btn" data-action="copy-link" data-id="${escHtml(id)}" title="Copy payment link">${window.GptUi.icon('link')}</button>`,
         );
       }
@@ -260,8 +263,8 @@
     };
     es.onerror = () => {
       es.close();
-      setTimeout(connectSSE, 3000);
     };
+    return es;
   }
 
   dom.jobList.addEventListener('click', (event) => {
@@ -276,6 +279,10 @@
         if (job && job.payment_link) {
           window.GptUi.copyText(job.payment_link);
         }
+      } else if (action === 'play-qr') {
+        api(`/api/link/jobs/${id}/play-qr`, { method: 'POST' })
+          .then(() => window.GptUi.showToast('QR automation started', 'success'))
+          .catch((err) => window.GptUi.showToast(err.message, 'error'));
       } else if (action === 'retry') {
         api(`/api/link/jobs/${id}/retry`, { method: 'POST' }).catch((err) => alert(err.message));
       } else if (action === 'stop' || action === 'remove') {
@@ -364,7 +371,11 @@
 
   dom.comboInput.addEventListener('input', updateComboCount);
   updateComboCount();
-  connectSSE();
+  if (window.GptUi && window.GptUi.registerTabSSE) {
+    window.GptUi.registerTabSSE('link', connectSSE);
+  } else {
+    connectSSE();
+  }
 
   setInterval(() => {
     let hasRunning = false;

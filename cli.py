@@ -304,8 +304,9 @@ def web_cmd(
         )
     except SystemExit:
         pass
-    except Exception:
-        pass
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
     finally:
         sys.stderr = _original_stderr
     typer.echo("\n[web] stopped.")

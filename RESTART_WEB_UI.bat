@@ -23,9 +23,9 @@ echo   √ Ready
 
 echo.
 echo [3/3] Starting Web UI...
-echo   → http://127.0.0.1:8089/
+echo   → http://127.0.0.1:8090/
 echo.
 
-.venv\Scripts\python -m gpt_signup_hybrid web --host 127.0.0.1 --port 8089
+.venv\Scripts\python -m gpt_signup_hybrid web --host 127.0.0.1 --port 8090
 
 pause

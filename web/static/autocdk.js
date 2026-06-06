@@ -1,65 +1,33 @@
-/* gpt_signup_hybrid — Check Live tab logic */
+/* gpt_signup_hybrid — Auto CDK tab logic */
 (() => {
   'use strict';
-
-  const MODE_CONFIG = {
-    combo: {
-      hint: 'One line per combo: email|password|2fa_secret',
-      placeholder: 'email@hotmail.com|password123|DNPARKKMM5EYOPDG...\nemail2@outlook.com|pass456|I77PEBZQNEBE67SU...',
-    },
-    session_json: {
-      hint: 'Paste one session JSON object (from /api/auth/session)',
-      placeholder: '{\n  "accessToken": "eyJhbGci...",\n  "user": { "email": "user@example.com", ... },\n  ...\n}',
-    },
-    access_token: {
-      hint: 'One raw accessToken (JWT) per line',
-      placeholder: 'eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ...\neyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ...',
-    },
-  };
 
   const state = {
     jobs: new Map(),
     order: [],
     activeJobId: null,
     maxConcurrent: 1,
-    mode: 'combo',
   };
 
   const $ = (id) => document.getElementById(id);
   const dom = {
-    comboInput: $('checker-combo-input'),
-    modeHint: $('checker-mode-hint'),
-    btnRun: $('checker-btn-run'),
-    btnStopAll: $('checker-btn-stop-all'),
-    btnClearInput: $('checker-btn-clear-input'),
-    btnClearDone: $('checker-btn-clear-done'),
-    btnCopyPlus: $('checker-btn-copy-plus'),
-    btnCopyFree: $('checker-btn-copy-free'),
-    btnCopyError: $('checker-btn-copy-error'),
-    comboCount: $('checker-combo-count'),
-    jobTimeout: $('checker-job-timeout'),
-    jobList: $('checker-job-list'),
-    jobSummary: $('checker-job-summary'),
-    logPane: $('checker-log-pane'),
-    logTarget: $('checker-log-target'),
-    plusPane: $('checker-plus-pane'),
-    freePane: $('checker-free-pane'),
-    errorPane: $('checker-error-pane'),
+    comboInput: $('autocdk-combo-input'),
+    keysInput: $('autocdk-keys-input'),
+    btnRun: $('autocdk-btn-run'),
+    btnStopAll: $('autocdk-btn-stop-all'),
+    btnClearInput: $('autocdk-btn-clear-input'),
+    btnClearDone: $('autocdk-btn-clear-done'),
+    btnCopySuccess: $('autocdk-btn-copy-success'),
+    btnCopyError: $('autocdk-btn-copy-error'),
+    comboCount: $('autocdk-combo-count'),
+    jobTimeout: $('autocdk-job-timeout'),
+    jobList: $('autocdk-job-list'),
+    jobSummary: $('autocdk-job-summary'),
+    logPane: $('autocdk-log-pane'),
+    logTarget: $('autocdk-log-target'),
+    successPane: $('autocdk-success-pane'),
+    errorPane: $('autocdk-error-pane'),
   };
-
-  // ─── Mode switching ───
-  const modeBtns = document.querySelectorAll('.checker-mode-btn');
-  modeBtns.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      modeBtns.forEach((b) => b.classList.remove('active'));
-      btn.classList.add('active');
-      state.mode = btn.dataset.mode;
-      const cfg = MODE_CONFIG[state.mode];
-      dom.modeHint.textContent = cfg.hint;
-      dom.comboInput.placeholder = cfg.placeholder;
-      updateComboCount();
-    });
-  });
 
   function escHtml(s) {
     return String(s).replace(/[&<>"']/g, (c) => ({
@@ -85,57 +53,49 @@
   }
 
   function updateComboCount() {
-    const text = dom.comboInput.value.trim();
-    let count = 0;
+    const textCombos = dom.comboInput.value.trim();
+    const textKeys = dom.keysInput.value.trim();
 
-    if (state.mode === 'combo' || state.mode === 'access_token') {
-      count = text.split('\n').filter((line) => {
-        const trimmed = line.trim();
-        return trimmed && !trimmed.startsWith('#');
-      }).length;
-    } else if (state.mode === 'session_json') {
-      count = text.length > 0 ? 1 : 0;
-    }
+    const countCombos = textCombos.split('\n').filter((line) => {
+      const trimmed = line.trim();
+      return trimmed && !trimmed.startsWith('#');
+    }).length;
 
-    const label = state.mode === 'session_json' ? 'session' : 'item';
-    dom.comboCount.textContent = `${count} ${label}${count === 1 ? '' : 's'}`;
+    const countKeys = textKeys.split('\n').filter((line) => {
+      const trimmed = line.trim();
+      return trimmed && !trimmed.startsWith('#');
+    }).length;
+
+    const minCount = Math.min(countCombos, countKeys);
+    dom.comboCount.textContent = `${countCombos} combos / ${countKeys} keys (pairs to run: ${minCount})`;
   }
 
   function renderResultPanes() {
-    const plusAccounts = [];
-    const freeAccounts = [];
+    const successAccounts = [];
     const failedAccounts = [];
 
     state.order.forEach((id) => {
       const job = state.jobs.get(id);
       if (!job) return;
 
-      const cred = job.password
-        ? `${job.email}|${job.password}${job.secret ? '|' + job.secret : ''}`
-        : job.email;
+      const cred = `${job.email}|CDK: ${job.cdk_key}`;
 
       if (job.status === 'success') {
-        const isPlus = job.plan && job.plan.includes('plus');
-        if (isPlus) {
-          plusAccounts.push(`${cred}|Live Plus (${job.plan})`);
-        } else {
-          freeAccounts.push(`${cred}|Live Free (${job.plan || 'chatgptfreeplan'})`);
-        }
+        successAccounts.push(`${cred}|Upgraded Plus`);
       } else if (job.status === 'error') {
-        failedAccounts.push(`${cred}|Die (${job.error || 'unknown error'})`);
+        failedAccounts.push(`${cred}|Error (${job.error || 'unknown error'})`);
       } else if (job.status === 'cancelled') {
         failedAccounts.push(`${cred}|Cancelled`);
       }
     });
 
-    dom.plusPane.textContent = plusAccounts.length ? plusAccounts.join('\n') : 'No Live Plus accounts yet.';
-    dom.freePane.textContent = freeAccounts.length ? freeAccounts.join('\n') : 'No Live Free accounts yet.';
+    dom.successPane.textContent = successAccounts.length ? successAccounts.join('\n') : 'No upgraded accounts yet.';
     dom.errorPane.textContent = failedAccounts.length ? failedAccounts.join('\n') : 'No errors yet.';
   }
 
   function renderJobs() {
     if (state.order.length === 0) {
-      dom.jobList.innerHTML = '<div class="empty">Paste input and click Check Live.</div>';
+      dom.jobList.innerHTML = '<div class="empty">Paste inputs and click Run Auto CDK.</div>';
       dom.jobSummary.textContent = '0 total';
       renderResultPanes();
       return;
@@ -155,31 +115,34 @@
           `<button class="icon-btn icon-danger" data-action="stop" data-id="${escHtml(id)}" title="Stop">${window.GptUi.icon('stop')}</button>`,
         );
       } else if (job.status === 'error') {
-        actions.push(
-          `<button class="icon-btn" data-action="retry" data-id="${escHtml(id)}" title="Retry">${window.GptUi.icon('retry')}</button>`,
-        );
+        // Chỉ cho retry nếu lỗi retriable (network/timeout). Terminal (CDK sai,
+        // account không đủ điều kiện) → không hiện retry để khỏi tốn lượt.
+        if (job.error_kind !== 'terminal') {
+          actions.push(
+            `<button class="icon-btn" data-action="retry" data-id="${escHtml(id)}" title="Retry">${window.GptUi.icon('retry')}</button>`,
+          );
+        }
       }
       actions.push(
         `<button class="icon-btn icon-danger" data-action="remove" data-id="${escHtml(id)}" title="Remove">${window.GptUi.icon('remove')}</button>`,
       );
 
       let meta = '';
-      if (job.status === 'success' && job.plan) {
-        const isPlus = job.plan.includes('plus');
-        const planCls = isPlus ? 'status-success' : 'status-queued';
-        meta = `<div class="job-meta ${planCls}" style="font-weight: 600; padding-left: 0.5rem;">Plan: ${escHtml(job.plan)}</div>`;
+      if (job.status === 'success') {
+        meta = `<div class="job-meta status-success" style="font-weight: 600; padding-left: 0.5rem;">Upgraded Plus!</div>`;
       } else if (job.error) {
-        meta = `<div class="job-meta status-error" style="padding-left: 0.5rem;">${escHtml(job.error)}</div>`;
+        const kindTag = job.error_kind === 'terminal'
+          ? '<span class="muted">[no-retry] </span>'
+          : '';
+        meta = `<div class="job-meta status-error" style="padding-left: 0.5rem;">${kindTag}${escHtml(job.error)}</div>`;
       }
-
-      const modeTag = job.mode && job.mode !== 'combo' ? `<span class="muted">[${escHtml(job.mode)}]</span> ` : '';
 
       return `
         <div class="${cls}" data-id="${escHtml(id)}">
           <div class="job-index">${idx + 1}</div>
           <div class="job-status status-${escHtml(job.status)}">${escHtml(job.status)}</div>
           <div class="job-main">
-            <div class="job-email" title="${escHtml(job.email)}">${modeTag}${escHtml(job.email)}</div>
+            <div class="job-email" title="${escHtml(job.email)}">${escHtml(job.email)} <span class="muted">(CDK: ${escHtml(job.cdk_key)})</span></div>
             ${meta}
           </div>
           <div class="job-duration">${escHtml(fmtDuration(job.duration))}</div>
@@ -209,7 +172,7 @@
     if (!job) return;
 
     dom.logTarget.textContent = job.email;
-    api(`/api/checker/jobs/${jobId}`).then((data) => {
+    api(`/api/autocdk/jobs/${jobId}`).then((data) => {
       dom.logPane.textContent = (data.log_lines || []).join('\n');
       dom.logPane.scrollTop = dom.logPane.scrollHeight;
     }).catch((err) => {
@@ -252,7 +215,7 @@
   }
 
   function connectSSE() {
-    const es = window.GptUi.authEventSource('/api/checker/events');
+    const es = window.GptUi.authEventSource('/api/autocdk/events');
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
@@ -267,10 +230,10 @@
         } else if (data.type === 'remove') {
           applyRemove(data.job_id);
         } else if (data.type === 'clear_finished') {
-          api('/api/checker/jobs').then((response) => applySnapshot(response.jobs || [])).catch(console.error);
+          api('/api/autocdk/jobs').then((response) => applySnapshot(response.jobs || [])).catch(console.error);
         }
       } catch (err) {
-        console.error('Checker SSE parse error', err);
+        console.error('Auto CDK SSE parse error', err);
       }
     };
     es.onerror = () => {
@@ -287,9 +250,9 @@
       event.stopPropagation();
 
       if (action === 'retry') {
-        api(`/api/checker/jobs/${id}/retry`, { method: 'POST' }).catch((err) => alert(err.message));
+        api(`/api/autocdk/jobs/${id}/retry`, { method: 'POST' }).catch((err) => alert(err.message));
       } else if (action === 'stop' || action === 'remove') {
-        api(`/api/checker/jobs/${id}`, { method: 'DELETE' }).catch((err) => alert(err.message));
+        api(`/api/autocdk/jobs/${id}`, { method: 'DELETE' }).catch((err) => alert(err.message));
       }
       return;
     }
@@ -301,45 +264,75 @@
     renderLog(state.activeJobId);
   });
 
+  let activeMode = 'combo';
+  const modeButtons = document.querySelectorAll('.autocdk-mode-btn');
+  modeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      modeButtons.forEach((b) => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeMode = btn.dataset.mode;
+      const comboLabel = $('autocdk-combo-label');
+      if (activeMode === 'access_token') {
+        comboLabel.textContent = 'Access Tokens';
+        dom.comboInput.placeholder = 'Paste access tokens here (one per line)';
+      } else {
+        comboLabel.textContent = 'Combos (email|pass|2fa)';
+        dom.comboInput.placeholder = 'email1@hotmail.com|pwd1|2FA_SECRET1\nemail2@outlook.com|pwd2|2FA_SECRET2';
+      }
+      updateComboCount();
+    });
+  });
+
   dom.btnRun.addEventListener('click', async () => {
     const combos = dom.comboInput.value.trim();
-    if (!combos) {
-      alert('Paste input first.');
+    const cdk_keys = dom.keysInput.value.trim();
+    if (!combos || !cdk_keys) {
+      alert('Paste combos and cdk keys first.');
       return;
     }
 
     dom.btnRun.disabled = true;
     try {
-      await api('/api/checker/jobs', {
+      // Auto CDK chạy 3 job song song (5 bị quá tải).
+      try {
+        await api('/api/autocdk/config', {
+          method: 'POST',
+          body: JSON.stringify({ max_concurrent: 3 }),
+        });
+        state.maxConcurrent = 3;
+      } catch (err) {
+        console.error('autocdk config sync failed:', err);
+      }
+
+      await api('/api/autocdk/jobs', {
         method: 'POST',
-        body: JSON.stringify({ combos, mode: state.mode }),
+        body: JSON.stringify({ combos, cdk_keys, mode: activeMode }),
       });
+      if (window.GptUi.showToast) window.GptUi.showToast('Auto CDK jobs started', 'success');
     } catch (err) {
-      alert('Error: ' + err.message);
+      if (window.GptUi.showToast) window.GptUi.showToast('Error: ' + err.message, 'error');
+      else alert('Error: ' + err.message);
     } finally {
       dom.btnRun.disabled = false;
     }
   });
 
   dom.btnStopAll.addEventListener('click', () => {
-    api('/api/checker/jobs/stop-all', { method: 'POST' }).catch((err) => alert(err.message));
+    api('/api/autocdk/jobs/stop-all', { method: 'POST' }).catch((err) => alert(err.message));
   });
 
   dom.btnClearInput.addEventListener('click', () => {
     dom.comboInput.value = '';
+    dom.keysInput.value = '';
     updateComboCount();
   });
 
   dom.btnClearDone.addEventListener('click', () => {
-    api('/api/checker/jobs/clear-finished', { method: 'POST' }).catch((err) => alert(err.message));
+    api('/api/autocdk/jobs/clear-finished', { method: 'POST' }).catch((err) => alert(err.message));
   });
 
-  dom.btnCopyPlus.addEventListener('click', () => {
-    window.GptUi.copyText(dom.plusPane.textContent);
-  });
-
-  dom.btnCopyFree.addEventListener('click', () => {
-    window.GptUi.copyText(dom.freePane.textContent);
+  dom.btnCopySuccess.addEventListener('click', () => {
+    window.GptUi.copyText(dom.successPane.textContent);
   });
 
   dom.btnCopyError.addEventListener('click', () => {
@@ -350,7 +343,7 @@
     const val = parseInt(dom.jobTimeout.value, 10);
     if (isNaN(val) || val < 30 || val > 600) return;
     try {
-      await api('/api/checker/config', {
+      await api('/api/autocdk/config', {
         method: 'POST',
         body: JSON.stringify({ job_timeout: val }),
       });
@@ -358,9 +351,10 @@
   });
 
   dom.comboInput.addEventListener('input', updateComboCount);
+  dom.keysInput.addEventListener('input', updateComboCount);
   updateComboCount();
   if (window.GptUi && window.GptUi.registerTabSSE) {
-    window.GptUi.registerTabSSE('checker', connectSSE);
+    window.GptUi.registerTabSSE('autocdk', connectSSE);
   } else {
     connectSSE();
   }

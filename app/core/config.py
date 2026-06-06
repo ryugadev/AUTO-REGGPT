@@ -75,6 +75,7 @@ class Settings:
     # Auto Gmail OTP (shopgmail) — KHÔNG hardcode, đọc từ env/.env
     shopgmail_api_key: str = ""
     shopgmail_otp_service: str = ""
+    auto_fill_upi: bool = False
 
     @property
     def profiles_dir(self) -> Path:
@@ -120,6 +121,7 @@ def load_settings(root_dir: Path | None = None, env_file: str | Path = ".env") -
         telegram_chat_id=_lookup(env, "TELEGRAM_CHAT_ID", ""),
         shopgmail_api_key=_lookup(env, "SHOPGMAIL_API_KEY", "").strip(),
         shopgmail_otp_service=_lookup(env, "SHOPGMAIL_OTP_SERVICE", "chatgpt").strip(),
+        auto_fill_upi=_parse_bool(_lookup(env, "AUTO_FILL_UPI", "false"), default=False),
     )
 
 

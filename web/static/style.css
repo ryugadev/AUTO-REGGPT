@@ -457,11 +457,13 @@ body {
 .card-success  { grid-area: success; }
 .card-error    { grid-area: error; }
 
-/* Non-Reg tabs (Session / Link / Check Live) có số card khác nhau →
-   layout 2 cột linh hoạt: input + jobs hàng đầu, log + outputs span full. */
+/* Non-Reg tabs (Session / Link / Check Live / Auto CDK / Check CDK) có số card
+   khác nhau → layout 2 cột linh hoạt: input + jobs hàng đầu, log + outputs bên dưới. */
 #tab-session.grid,
 #tab-link.grid,
-#tab-checker.grid {
+#tab-checker.grid,
+#tab-autocdk.grid,
+#tab-cdkcheck.grid {
   grid-template-columns: minmax(520px, 0.95fr) minmax(560px, 1.05fr);
   grid-template-rows: auto;
   grid-template-areas: none;
@@ -470,19 +472,33 @@ body {
 }
 #tab-session.grid > .card,
 #tab-link.grid > .card,
-#tab-checker.grid > .card { grid-area: auto; }
+#tab-checker.grid > .card,
+#tab-autocdk.grid > .card,
+#tab-cdkcheck.grid > .card { grid-area: auto; }
 #tab-session .card-input,
 #tab-link .card-input,
-#tab-checker .card-input { grid-column: 1; }
+#tab-checker .card-input,
+#tab-autocdk .card-input,
+#tab-cdkcheck .card-input { grid-column: 1; }
 #tab-session .card-jobs,
 #tab-link .card-jobs,
-#tab-checker .card-jobs { grid-column: 2; }
+#tab-checker .card-jobs,
+#tab-autocdk .card-jobs,
+#tab-cdkcheck .card-jobs { grid-column: 2; }
 #tab-session .card-log,
 #tab-link .card-log,
 #tab-checker .card-log,
+#tab-autocdk .card-log,
+#tab-cdkcheck .card-log,
 #tab-session .card-span-full,
 #tab-link .card-span-full,
-#tab-checker .card-span-full { grid-column: 1 / -1; }
+#tab-checker .card-span-full,
+#tab-autocdk .card-span-full,
+#tab-cdkcheck .card-span-full { grid-column: 1 / -1; }
+
+/* Check CDK: 2 panel Live + Dead nằm cạnh nhau (mỗi cái 1 cột) */
+#tab-cdkcheck .card-success { grid-column: 1; }
+#tab-cdkcheck .card-error { grid-column: 2; }
 
 /* ─────────────────────────────────────────────────────────────────
    CARD / PANEL
@@ -911,6 +927,11 @@ body {
   border-color: var(--danger);
 }
 
+.icon-btn.icon-play:hover {
+  color: var(--success);
+  border-color: var(--success);
+}
+
 .icon-btn svg { width: 14px; height: 14px; }
 
 /* Metric pills (jobs header) — class mới, optional cho summary chips */
@@ -1177,13 +1198,22 @@ body {
 
   #tab-session.grid,
   #tab-link.grid,
-  #tab-checker.grid { grid-template-columns: 1fr; }
+  #tab-checker.grid,
+  #tab-autocdk.grid,
+  #tab-cdkcheck.grid { grid-template-columns: 1fr; }
   #tab-session .card-input,
   #tab-link .card-input,
   #tab-checker .card-input,
+  #tab-autocdk .card-input,
+  #tab-cdkcheck .card-input,
   #tab-session .card-jobs,
   #tab-link .card-jobs,
-  #tab-checker .card-jobs { grid-column: 1 / -1; }
+  #tab-checker .card-jobs,
+  #tab-autocdk .card-jobs,
+  #tab-cdkcheck .card-jobs { grid-column: 1 / -1; }
+  /* Check CDK mobile: 2 panel Live/Dead xuống 1 cột */
+  #tab-cdkcheck .card-success,
+  #tab-cdkcheck .card-error { grid-column: 1 / -1; }
 
   .topbar {
     flex-wrap: wrap;
@@ -1248,3 +1278,46 @@ body {
   .tab-nav { width: 100%; }
   .tab-btn { flex: 1 1 auto; }
 }
+
+/* ─────────────────────────────────────────────────────────────────
+   AUTO CDK TWO-COLUMN TEXTAREAS
+   ───────────────────────────────────────────────────────────────── */
+.two-col-textareas {
+  display: flex;
+  gap: 16px;
+  width: 100%;
+  margin-top: 12px;
+}
+
+.textarea-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.textarea-col .input-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.textarea-col textarea {
+  width: 100%;
+  height: 220px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-md);
+  color: var(--text-main);
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  resize: vertical;
+  outline: none;
+}
+
+.textarea-col textarea:focus {
+  border-color: var(--primary);
+  box-shadow: var(--focus-ring);
+}
+

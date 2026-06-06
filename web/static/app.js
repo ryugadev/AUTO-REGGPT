@@ -84,6 +84,7 @@
     download: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
     link: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.07 0l2.83-2.83a5 5 0 0 0-7.07-7.07L11 4"/><path d="M14 11a5 5 0 0 0-7.07 0L4.1 13.83a5 5 0 1 0 7.07 7.07L13 19"/></svg>',
     token: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 2l-2 2"/><path d="M7.61 13.39a5.5 5.5 0 1 0 7.78 7.78L21 15.5l-7.5-7.5-5.89 5.39Z"/><path d="m14.5 6.5 3 3"/></svg>',
+    play: '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>',
   });
   const mailModeUiCopy = Object.freeze({
     outlook: {
@@ -173,6 +174,41 @@
     el.addEventListener('click', remove);
   }
 
+  // ── SSE connection manager (giới hạn 6 connection/origin của browser) ──
+  // Chỉ giữ MỞ EventSource cho tab đang active. Chuyển tab → đóng SSE cũ,
+  // mở SSE tab mới. Tránh 6 tab cùng mở SSE làm đầy quota connection → treo request.
+  const _sseRegistry = {};   // tabId → factory() trả về EventSource
+  let _activeSSE = null;     // { tabId, es }
+
+  function registerTabSSE(tabId, factory) {
+    _sseRegistry[tabId] = factory;
+    // Nếu tab này đang active ngay lúc đăng ký → mở luôn
+    const cur = document.querySelector('.tab-btn.active')?.dataset.tab;
+    if (cur === tabId && (!_activeSSE || _activeSSE.tabId !== tabId)) {
+      _openTabSSE(tabId);
+    }
+  }
+
+  function _closeActiveSSE() {
+    if (_activeSSE && _activeSSE.es) {
+      try { _activeSSE.es.close(); } catch (e) { /* ignore */ }
+    }
+    _activeSSE = null;
+  }
+
+  function _openTabSSE(tabId) {
+    const factory = _sseRegistry[tabId];
+    if (!factory) return;
+    if (_activeSSE && _activeSSE.tabId === tabId) return; // đã mở
+    _closeActiveSSE();
+    try {
+      const es = factory();
+      _activeSSE = { tabId, es };
+    } catch (e) {
+      console.error('SSE open failed for tab', tabId, e);
+    }
+  }
+
   function activateTab(tabId) {
     document.querySelectorAll('.tab-btn').forEach((btn) => {
       btn.classList.toggle('active', btn.dataset.tab === tabId);
@@ -181,6 +217,8 @@
       tab.classList.toggle('active', tab.id === `tab-${tabId}`);
     });
     localStorage.setItem(LS_ACTIVE_TAB, tabId);
+    // Chuyển SSE sang tab mới (chỉ 1 SSE mở tại 1 thời điểm)
+    _openTabSSE(tabId);
   }
 
   function initTabs() {
@@ -199,6 +237,7 @@
     showToast,
     activateTab,
     initTabs,
+    registerTabSSE,
     getAuthToken,
     authEventSource,
   });
@@ -237,6 +276,7 @@
         postRegBtns += `<button class="icon-btn" data-action="download-session" data-id="${escHtml(id)}" title="Download session JSON">${icon('download')}</button>`;
       }
       if (j.payment_link) {
+        postRegBtns += `<button class="icon-btn icon-play" data-action="play-qr" data-id="${escHtml(id)}" title="Play/Show QR Code">${icon('play')}</button>`;
         postRegBtns += `<button class="icon-btn" data-action="copy-link" data-id="${escHtml(id)}" title="Copy payment link">${icon('link')}</button>`;
       }
       let statusText = escHtml(j.status);
@@ -425,6 +465,15 @@
       } else if (action === 'copy-link') {
         const j = state.jobs.get(id);
         if (j && j.payment_link) copyText(j.payment_link);
+      } else if (action === 'play-qr') {
+        fetch(`/api/jobs/${id}/play-qr`, { method: 'POST' })
+          .then(res => {
+            if (!res.ok) throw new Error('Failed to run QR automation');
+            showToast('QR automation started', 'success');
+          })
+          .catch(err => {
+            showToast(err.message, 'error');
+          });
       }
       return;
     }
@@ -711,10 +760,10 @@
       }
     };
     es.onerror = () => {
-      console.warn('SSE disconnected, retry in 3s');
+      console.warn('SSE disconnected (reg)');
       es.close();
-      setTimeout(connectSSE, 3000);
     };
+    return es;
   }
 
   // ── Mail Mode ─────────────────────────────────────────────────────
@@ -993,10 +1042,14 @@
     applyProxyStateFromServer(r.proxy);
   }).catch(console.error);
 
+  // Đăng ký SSE cho tab Reg vào manager (chỉ mở khi tab active) TRƯỚC initTabs
+  // để activateTab(initialTab) có thể mở đúng connection.
+  if (window.GptUi && window.GptUi.registerTabSSE) {
+    window.GptUi.registerTabSSE('reg', connectSSE);
+  }
   initTabs();
   updateComboCount();
   bootstrapMailModes();
-  connectSSE();
 
   // Timer cập nhật duration cho jobs đang running mỗi giây
   setInterval(() => {

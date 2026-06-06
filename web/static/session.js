@@ -342,13 +342,17 @@
     };
     es.onerror = () => {
       es.close();
-      setTimeout(connectSSE, 3000);
     };
+    return es;
   }
 
   // ── Init ──────────────────────────────────────────────────────────
   updateComboCount();
-  connectSSE();
+  if (window.GptUi && window.GptUi.registerTabSSE) {
+    window.GptUi.registerTabSSE('session', connectSSE);
+  } else {
+    connectSSE();
+  }
 
   // Duration timer
   setInterval(() => {

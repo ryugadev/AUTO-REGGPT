@@ -821,6 +821,25 @@ class JobManager:
                 job.promo_eligible = "Yes" if promo_eligible == "OK" else "No"
                 self._job_log(job, f"[post-reg] payment link (India): {url} (promo_eligible: {job.promo_eligible})")
                 self._broadcast_job(job)
+
+                # settings = load_settings()
+                # if settings.auto_fill_upi:
+                #     if promo_eligible == "OK":
+                #         self._job_log(job, "[post-reg] spawning background auto-fill UPI process...")
+                #         import subprocess
+                #         import sys
+                #         subprocess.Popen([
+                #             sys.executable,
+                #             "-m", "app.services.stripe_auto",
+                #             "--url", url,
+                #             "--proxy", self._proxy or "",
+                #             "--job-id", job.id,
+                #             "--email", job.email,
+                #             "--region", "IN"
+                #         ], cwd=str(settings.root_dir), close_fds=True)
+                #     else:
+                #         self._job_log(job, f"[post-reg] success No (promo: {promo_eligible}) -> skipping auto-fill, proceeding to next link")
+                self._job_log(job, "[post-reg] manual UPI launch option available (click Play to start)")
             except Exception as exc:
                 self._job_log(job, f"[post-reg] get-link failed: {exc}")
 
@@ -1800,6 +1819,25 @@ class LinkJobManager:
             log(f"[link] success: {url} (promo_eligible: {promo_eligible})")
             self._broadcast_job(job)
 
+            # settings = load_settings()
+            # if settings.auto_fill_upi:
+            #     if promo_eligible == "OK":
+            #         self._job_log(job, "[link] spawning background auto-fill UPI process...")
+            #         import subprocess
+            #         import sys
+            #         subprocess.Popen([
+            #             sys.executable,
+            #             "-m", "app.services.stripe_auto",
+            #             "--url", url,
+            #             "--proxy", self._proxy or "",
+            #             "--job-id", job.id,
+            #             "--email", job.email,
+            #             "--region", job.region
+            #         ], cwd=str(settings.root_dir), close_fds=True)
+            #     else:
+            #         self._job_log(job, f"[link] success No (promo: {promo_eligible}) -> skipping auto-fill, proceeding to next link")
+            self._job_log(job, "[link] manual UPI launch option available (click Play to start)")
+
         except asyncio.CancelledError:
             job.status = "cancelled"
             job.finished_at = time.time()
@@ -2383,3 +2421,1093 @@ def get_checker_manager() -> CheckLiveJobManager:
     if _checker_manager is None:
         _checker_manager = CheckLiveJobManager(max_concurrent=1)
     return _checker_manager
+
+
+# ─────────────────────────────────────────────────────────────────────
+# AutoCdkJobManager — Auto CDK Upgrade feature
+# ─────────────────────────────────────────────────────────────────────
+
+from ..session_phase import SessionError, get_session  # noqa: E402
+
+def get_email_from_token(token: str) -> str:
+    try:
+        import base64
+        import json
+        parts = token.split(".")
+        if len(parts) >= 2:
+            padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
+            payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+            profile = payload.get("https://api.openai.com/profile", {})
+            email = profile.get("email")
+            if email:
+                return email
+    except Exception:
+        pass
+    return "token_account"
+
+
+# baxigpt API trả msg tiếng Trung. Map sang nhãn rõ ràng + phân loại terminal
+# (không nên retry tự động) vs transient (có thể retry).
+_AUTOCDK_TERMINAL_MARKERS = (
+    "卡密不存在",      # card không tồn tại
+    "请输入卡密",      # chưa nhập card
+    "已用完",          # hết lượt
+    "次数不足",        # không đủ lượt
+    "已过期",          # card hết hạn
+    "不支持",          # account không đủ điều kiện (đã từng Plus)
+    "无资格",          # không đủ tư cách trial
+    "not eligible",
+    "no free trial",
+)
+
+_AUTOCDK_MSG_MAP = {
+    "卡密不存在": "CDK không tồn tại",
+    "请输入卡密": "Chưa nhập CDK",
+    "卡密已用完": "CDK đã hết lượt sử dụng",
+    "卡密已过期": "CDK đã hết hạn",
+    "查询失败": "Query thất bại (order không tồn tại)",
+    "出码失败": "Tạo mã thanh toán thất bại",
+    "订单已过期": "Đơn đã hết hạn",
+}
+
+
+def _autocdk_translate_msg(msg: str) -> str:
+    """Dịch msg baxigpt sang nhãn dễ hiểu. Giữ nguyên nếu không khớp."""
+    if not msg:
+        return msg
+    for zh, vi in _AUTOCDK_MSG_MAP.items():
+        if zh in msg:
+            return vi
+    return msg
+
+
+def _autocdk_is_terminal(msg: str) -> bool:
+    """True nếu lỗi thuộc loại không nên retry (CDK/account vĩnh viễn không dùng được)."""
+    s = (msg or "").lower()
+    raw = msg or ""
+    return any(m in raw or m.lower() in s for m in _AUTOCDK_TERMINAL_MARKERS)
+
+
+class _AutoCdkError(Exception):
+    """Lỗi Auto CDK kèm phân loại terminal/retriable."""
+    def __init__(self, message: str, *, kind: str = "retriable"):
+        super().__init__(message)
+        self.kind = kind  # "terminal" | "retriable"
+
+
+async def _autocdk_verify_plus(access_token: str, *, proxy: str | None, log) -> bool | None:
+    """Gọi /backend-api/accounts/check để xác nhận account đã lên Plus thật chưa.
+
+    Returns:
+        True  — chắc chắn đã Plus (override báo sai từ baxigpt).
+        False — chắc chắn chưa Plus (free).
+        None  — không xác định được (lỗi mạng/token expire) → giữ nguyên kết luận trước đó.
+    """
+    try:
+        from app.services.checker_service import check_subscription
+        plan = await check_subscription(access_token, proxy=proxy, timeout=20.0)
+        plan_str = str(plan or "").lower()
+        is_plus = "plus" in plan_str or "team" in plan_str or "pro" in plan_str
+        log(f"[verify] plan thực tế: {plan_str or '?'} → {'PLUS' if is_plus else 'FREE'}")
+        return is_plus
+    except Exception as exc:
+        log(f"[verify] không kiểm tra được Plus: {type(exc).__name__}: {exc}")
+        return None
+
+
+
+@dataclass
+class AutoCdkJob:
+    id: str
+    email: str
+    password: str
+    secret: str | None = None
+    cdk_key: str = ""
+    status: JobStatus = "queued"
+    log_lines: list[str] = field(default_factory=list)
+    error: str | None = None
+    error_kind: str | None = None  # "terminal" | "retriable" | None
+    created_at: float = field(default_factory=time.time)
+    started_at: float | None = None
+    finished_at: float | None = None
+    access_token: str | None = None
+    order_id: str | None = None  # lưu sau submit để retry chỉ poll lại status
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "email": self.email,
+            "cdk_key": self.cdk_key,
+            "status": self.status,
+            "error": self.error,
+            "error_kind": self.error_kind,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "duration": (
+                (self.finished_at or time.time()) - self.started_at if self.started_at else None
+            ),
+            "log_count": len(self.log_lines),
+        }
+
+    def to_dict_full(self) -> dict[str, Any]:
+        d = self.to_dict()
+        d["log_lines"] = list(self.log_lines)
+        return d
+
+
+class AutoCdkJobManager:
+    """Quản lý Auto CDK jobs — login via browser -> redeem CDK on baxigpt.com."""
+
+    def __init__(self, *, max_concurrent: int = 1):
+        self.jobs: dict[str, AutoCdkJob] = {}
+        self.order: list[str] = []
+        self._max = max_concurrent
+        self._headless = True
+        self._job_timeout = 180.0
+        self._proxy: str | None = _DEFAULT_PROXY
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._subscribers: set[asyncio.Queue] = set()
+        self._job_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._workers: list[asyncio.Task] = []
+        self._worker_started = False
+        self._stagger_lock = asyncio.Lock()
+        self._last_start_ts: float = 0.0
+        self._stagger_min_seconds = 5.0
+        self._stagger_max_seconds = 10.0
+
+    @property
+    def headless(self) -> bool:
+        return self._headless
+
+    def set_headless(self, value: bool) -> None:
+        self._headless = bool(value)
+
+    def _ensure_workers(self) -> None:
+        if not self._worker_started:
+            self._worker_started = True
+        self._workers = [w for w in self._workers if not w.done()]
+        while len(self._workers) < self._max:
+            w = asyncio.create_task(self._worker_loop())
+            self._workers.append(w)
+        while len(self._workers) > self._max:
+            w = self._workers.pop()
+            w.cancel()
+
+    async def _worker_loop(self) -> None:
+        try:
+            while True:
+                job_id = await self._job_queue.get()
+                job = self.jobs.get(job_id)
+                if job is None or job.status != "queued":
+                    continue
+                if self._max > 1:
+                    async with self._stagger_lock:
+                        now = time.monotonic()
+                        wait_min = self._last_start_ts + self._stagger_min_seconds - now
+                        if wait_min > 0:
+                            jitter = random.uniform(
+                                self._stagger_min_seconds, self._stagger_max_seconds,
+                            )
+                            wait = max(wait_min, jitter)
+                            self._last_start_ts = now + wait
+                        else:
+                            wait = 0.0
+                            self._last_start_ts = now
+                    if wait > 0:
+                        self._job_log(job, f"[stagger] đợi {wait:.1f}s trước khi start")
+                        deadline = time.monotonic() + wait
+                        while True:
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                break
+                            await asyncio.sleep(min(0.25, remaining))
+                            cur = self.jobs.get(job_id)
+                            if cur is None or cur.status != "queued":
+                                break
+                    cur = self.jobs.get(job_id)
+                    if cur is None or cur.status != "queued":
+                        continue
+                inner = asyncio.create_task(self._run_job(job))
+                self._tasks[job_id] = inner
+                try:
+                    await inner
+                except asyncio.CancelledError:
+                    if inner.cancelled():
+                        continue
+                    raise
+                finally:
+                    self._tasks.pop(job_id, None)
+        except asyncio.CancelledError:
+            pass
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._max
+
+    def set_max_concurrent(self, n: int) -> None:
+        if n < 1 or n > 10:
+            raise ValueError("max_concurrent phải trong [1, 10]")
+        self._max = n
+        self._ensure_workers()
+
+    @property
+    def job_timeout(self) -> float:
+        return self._job_timeout
+
+    def set_job_timeout(self, seconds: float) -> None:
+        if seconds < 30 or seconds > 600:
+            raise ValueError("job_timeout phải trong [30, 600]")
+        self._job_timeout = float(seconds)
+
+    @property
+    def proxy(self) -> str | None:
+        return self._proxy
+
+    def set_proxy(self, value: str | None) -> None:
+        if value is None:
+            self._proxy = None
+            return
+        v = str(value).strip()
+        self._proxy = v or None
+
+    def _safe_proxy_log(self) -> str:
+        return _mask_proxy(self._proxy)
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=500)
+        self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        self._subscribers.discard(q)
+
+    def _broadcast(self, event: dict[str, Any]) -> None:
+        for q in list(self._subscribers):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+    def _job_log(self, job: AutoCdkJob, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        job.log_lines.append(line)
+        if len(job.log_lines) > 500:
+            job.log_lines = job.log_lines[-500:]
+        self._broadcast({"type": "log", "job_id": job.id, "line": line})
+
+    def _broadcast_job(self, job: AutoCdkJob) -> None:
+        self._broadcast({"type": "job", "job": job.to_dict()})
+
+    def add_jobs(self, combos: list[str], cdk_keys: list[str], mode: str = "combo") -> list[AutoCdkJob]:
+        existing_emails = {j.email.lower() for j in self.jobs.values() if j.status != "cancelled"}
+        out: list[AutoCdkJob] = []
+
+        # Ghép cặp combos và cdk_keys dòng theo dòng (line by line)
+        paired = []
+        for i in range(min(len(combos), len(cdk_keys))):
+            c_line = combos[i].strip()
+            k_line = cdk_keys[i].strip()
+            if not c_line or c_line.startswith("#") or not k_line or k_line.startswith("#"):
+                continue
+            paired.append((c_line, k_line))
+
+        for c_line, k_line in paired:
+            if mode == "access_token":
+                email = get_email_from_token(c_line)
+                if not email:
+                    jid = uuid.uuid4().hex[:12]
+                    job = AutoCdkJob(
+                        id=jid, email="<invalid token>", password="", secret=None,
+                        cdk_key=k_line, access_token=c_line,
+                        status="error", error="Token không hợp lệ hoặc bị thiếu phần payload (JWT truncated)",
+                        error_kind="terminal",
+                        finished_at=time.time()
+                    )
+                    self.jobs[jid] = job
+                    self.order.append(jid)
+                    self._broadcast_job(job)
+                    out.append(job)
+                    continue
+
+                # Dedup theo email thật. Token không parse được email (fallback
+                # "token_account") → dedup theo (email + cdk) để không loại nhầm.
+                dedup_key = email.lower() if email != "token_account" else f"{email.lower()}|{k_line.lower()}"
+                if dedup_key in existing_emails:
+                    continue
+                existing_emails.add(dedup_key)
+
+                jid = uuid.uuid4().hex[:12]
+                job = AutoCdkJob(
+                    id=jid, email=email, password="", secret=None,
+                    cdk_key=k_line, access_token=c_line
+                )
+                self.jobs[jid] = job
+                self.order.append(jid)
+                self._broadcast_job(job)
+                out.append(job)
+                continue
+
+            parts = c_line.split("|")
+            if len(parts) < 2:
+                jid = uuid.uuid4().hex[:12]
+                job = AutoCdkJob(
+                    id=jid, email="<invalid>", password="", cdk_key=k_line,
+                    status="error", error=f"format sai, cần email|password|secret: {c_line[:60]}",
+                    finished_at=time.time(),
+                )
+                self.jobs[jid] = job
+                self.order.append(jid)
+                self._broadcast_job(job)
+                out.append(job)
+                continue
+
+            email = parts[0].strip()
+            password = parts[1].strip()
+            secret = parts[2].strip() if len(parts) >= 3 else None
+
+            if email.lower() in existing_emails:
+                continue
+            existing_emails.add(email.lower())
+
+            jid = uuid.uuid4().hex[:12]
+            job = AutoCdkJob(id=jid, email=email, password=password, secret=secret, cdk_key=k_line)
+            self.jobs[jid] = job
+            self.order.append(jid)
+            self._broadcast_job(job)
+            out.append(job)
+
+        self._ensure_workers()
+        for j in out:
+            if j.status == "queued":
+                self._job_queue.put_nowait(j.id)
+        return out
+
+    def stop_all(self) -> int:
+        while not self._job_queue.empty():
+            try:
+                self._job_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        count = 0
+        for job_id, job in list(self.jobs.items()):
+            if job.status in ("running", "queued"):
+                task = self._tasks.get(job_id)
+                if task and not task.done():
+                    task.cancel()
+                job.status = "cancelled"
+                job.finished_at = time.time()
+                self._broadcast_job(job)
+                count += 1
+        self._last_start_ts = 0.0
+        return count
+
+    def clear_finished(self) -> int:
+        removed = 0
+        for jid in list(self.order):
+            job = self.jobs.get(jid)
+            if job and job.status in ("success", "error"):
+                self.jobs.pop(jid, None)
+                self.order.remove(jid)
+                self._tasks.pop(jid, None)
+                removed += 1
+        if removed:
+            self._broadcast({"type": "clear_finished", "removed": removed})
+        return removed
+
+    def remove_job(self, job_id: str) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+            job.status = "cancelled"
+            job.finished_at = time.time()
+        self.jobs.pop(job_id, None)
+        if job_id in self.order:
+            self.order.remove(job_id)
+        self._tasks.pop(job_id, None)
+        self._broadcast({"type": "remove", "job_id": job_id})
+        return True
+
+    def retry_job(self, job_id: str) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+        job.status = "queued"
+        job.error = None
+        job.error_kind = None
+        job.started_at = None
+        job.finished_at = None
+        # GIỮ NGUYÊN job.access_token + job.order_id để resume:
+        #   - có access_token → bỏ qua login
+        #   - có order_id → bỏ qua verify+submit, chỉ poll lại status (không tốn lượt CDK)
+        resume_note = []
+        if job.access_token:
+            resume_note.append("skip login")
+        if job.order_id:
+            resume_note.append("resume poll")
+        note = f" ({', '.join(resume_note)})" if resume_note else ""
+        job.log_lines.append(f"[{datetime.now():%H:%M:%S}] -- retry{note} --")
+        self._broadcast_job(job)
+        self._ensure_workers()
+        self._job_queue.put_nowait(job_id)
+        return True
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        return [self.jobs[jid].to_dict() for jid in self.order if jid in self.jobs]
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        job = self.jobs.get(job_id)
+        return job.to_dict_full() if job else None
+
+    def get_log(self, job_id: str) -> list[str]:
+        job = self.jobs.get(job_id)
+        return list(job.log_lines) if job else []
+
+    async def _run_job(self, job: AutoCdkJob) -> None:
+        self._tasks[job.id] = asyncio.current_task()
+        from ..config import env_insecure_tls
+        try:
+            if job.id not in self.jobs:
+                return
+            job.status = "running"
+            job.started_at = time.time()
+            self._broadcast_job(job)
+
+            def log(msg: str) -> None:
+                self._job_log(job, msg)
+
+            access_token = job.access_token
+            if not access_token:
+                log("[autocdk] starting login to chatgpt...")
+                if self._proxy:
+                    log(f"[autocdk] via proxy {self._safe_proxy_log()}")
+                
+                try:
+                    session_data = await asyncio.wait_for(
+                        get_session(
+                            email=job.email,
+                            password=job.password,
+                            secret=job.secret,
+                            headless=self._headless,
+                            proxy=self._proxy,
+                            tls_insecure=env_insecure_tls(),
+                            log=log,
+                        ),
+                        timeout=self._job_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    job.status = "error"
+                    job.error = f"timeout {self._job_timeout:.0f}s exceeded during login"
+                    job.error_kind = "retriable"
+                    job.finished_at = time.time()
+                    self._job_log(job, f"[fatal] timeout {self._job_timeout:.0f}s")
+                    self._broadcast_job(job)
+                    return
+                except SessionError as exc:
+                    job.status = "error"
+                    job.error = f"login failed: {exc}"
+                    job.error_kind = "retriable"
+                    job.finished_at = time.time()
+                    self._job_log(job, f"[login] failed: {exc}")
+                    self._broadcast_job(job)
+                    return
+
+                access_token = session_data.get("accessToken") if session_data else None
+                if not access_token:
+                    job.status = "error"
+                    job.error = "login failed: missing accessToken"
+                    job.error_kind = "retriable"
+                    job.finished_at = time.time()
+                    self._job_log(job, "[login] missing accessToken in session data")
+                    self._broadcast_job(job)
+                    return
+                # Lưu token để retry không phải login lại
+                job.access_token = access_token
+                log("[autocdk] login success, starting card redemption...")
+            else:
+                log("[autocdk] dùng access_token đã có (bỏ qua login)")
+            
+            import httpx
+            
+            client_kwargs = {
+                "timeout": 30.0,
+                "verify": not env_insecure_tls(),
+            }
+            if self._proxy:
+                client_kwargs["proxy"] = self._proxy
+
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                order_id = job.order_id
+                if order_id:
+                    # Retry resume: đã submit trước đó → bỏ qua verify+submit, poll lại.
+                    log(f"[autocdk] resume poll order_id={order_id} (bỏ qua verify+submit)")
+                else:
+                    # 1. Verify CDK key
+                    log("[autocdk] verifying card key via API...")
+                    try:
+                        res = await client.post(
+                            "https://baxigpt.com/api/code-info",
+                            json={"code": job.cdk_key},
+                            headers={"User-Agent": "Mozilla/5.0"}
+                        )
+                        res.raise_for_status()
+                        data = res.json()
+                    except Exception as exc:
+                        raise _AutoCdkError(f"Verify CDK lỗi mạng: {exc}", kind="retriable")
+
+                    if not data.get("ok"):
+                        raw_msg = data.get("msg") or data.get("message") or json.dumps(data, ensure_ascii=False)
+                        nice = _autocdk_translate_msg(raw_msg)
+                        kind = "terminal" if _autocdk_is_terminal(raw_msg) else "retriable"
+                        raise _AutoCdkError(f"CDK invalid: {nice}", kind=kind)
+
+                    remaining = data.get("remaining")
+                    log(f"[autocdk] CDK hợp lệ. Lượt còn lại: {remaining}")
+
+                    # 2. Submit access token
+                    log("[autocdk] submitting access token via API...")
+                    try:
+                        res = await client.post(
+                            "https://baxigpt.com/api/submit",
+                            json={"code": job.cdk_key, "at": access_token},
+                            headers={"User-Agent": "Mozilla/5.0"}
+                        )
+                        res.raise_for_status()
+                        data = res.json()
+                    except Exception as exc:
+                        raise _AutoCdkError(f"Submit token lỗi mạng: {exc}", kind="retriable")
+
+                    if not data.get("ok"):
+                        raw_msg = data.get("msg") or data.get("message") or json.dumps(data, ensure_ascii=False)
+                        nice = _autocdk_translate_msg(raw_msg)
+                        kind = "terminal" if _autocdk_is_terminal(raw_msg) else "retriable"
+                        raise _AutoCdkError(f"Submit failed: {nice}", kind=kind)
+
+                    order_id = data.get("order_id")
+                    if not order_id:
+                        raise _AutoCdkError("Submit không trả order_id", kind="retriable")
+                    # Lưu order_id để retry chỉ poll lại (không submit lại, không tốn lượt CDK)
+                    job.order_id = order_id
+                    log(f"[autocdk] submit OK. Order ID: {order_id}. Đang poll status...")
+
+                # 3. Poll status (tối đa ~10 phút)
+                success_keywords = ("paid", "success", "ok", "done", "completed")
+                error_keywords = ("expired", "failed", "refunded", "fail")
+
+                activated = False
+                fail_msg = "Hết thời gian chờ kích hoạt (timeout)"
+                fail_kind = "retriable"
+                consecutive_poll_err = 0
+
+                for attempt in range(120):
+                    await asyncio.sleep(5.0)
+                    try:
+                        res = await client.post(
+                            "https://baxigpt.com/api/status",
+                            json={"order_id": order_id},
+                            headers={"User-Agent": "Mozilla/5.0"}
+                        )
+                        res.raise_for_status()
+                        status_data = res.json()
+                        consecutive_poll_err = 0
+                    except Exception as exc:
+                        consecutive_poll_err += 1
+                        log(f"[autocdk] poll lỗi ({consecutive_poll_err}): {exc}")
+                        if consecutive_poll_err >= 8:
+                            fail_msg = f"Poll status thất bại liên tục: {exc}"
+                            fail_kind = "retriable"
+                            break
+                        continue
+
+                    if not status_data.get("ok"):
+                        # status endpoint trả ok=false → có thể order chưa sẵn sàng, tiếp tục
+                        log(f"[autocdk] status chưa sẵn sàng: {status_data.get('msg')}")
+                        continue
+
+                    status = str(status_data.get("status", "")).lower()
+                    log(f"[autocdk] order status: {status or '(empty)'}")
+
+                    if any(k == status or k in status for k in success_keywords):
+                        activated = True
+                        break
+                    if any(k == status or k in status for k in error_keywords):
+                        raw = status_data.get("msg") or status
+                        fail_msg = f"Kích hoạt thất bại: {_autocdk_translate_msg(raw)}"
+                        # expired/refunded → CDK trả về, có thể retry; failed code → terminal
+                        fail_kind = "terminal" if "fail" in status and "expired" not in status else "retriable"
+                        break
+
+                if activated:
+                    # Xác nhận lại bằng API ChatGPT — đôi khi baxigpt báo paid
+                    # nhưng OpenAI chưa kích hoạt thật.
+                    verified = await _autocdk_verify_plus(access_token, proxy=self._proxy, log=log)
+                    if verified is False:
+                        # Baxigpt báo paid nhưng account chưa Plus thật → coi như fail terminal
+                        # (CDK đã tiêu, không retry vô ích).
+                        log("[autocdk] ⚠ baxigpt báo paid nhưng account chưa Plus → mark fail")
+                        raise _AutoCdkError(
+                            "Baxigpt báo paid nhưng account chưa Plus thật",
+                            kind="terminal",
+                        )
+                    job.status = "success"
+                    job.error = None
+                    job.error_kind = None
+                    job.order_id = None
+                    job.finished_at = time.time()
+                    log("[autocdk] ✓ Upgrade thành công! Account đã lên PLUS!")
+                    self._broadcast_job(job)
+                else:
+                    # Trước khi raise fail — verify lại với API ChatGPT.
+                    # Đôi khi baxigpt báo timeout/fail nhưng Plus đã active thật
+                    # (đặc biệt trên mail nhận thông báo xanh).
+                    verified = await _autocdk_verify_plus(access_token, proxy=self._proxy, log=log)
+                    if verified is True:
+                        log(f"[autocdk] ✓ baxigpt báo {fail_msg!r} nhưng Plus đã active thật → override SUCCESS")
+                        job.status = "success"
+                        job.error = None
+                        job.error_kind = None
+                        job.order_id = None
+                        job.finished_at = time.time()
+                        self._broadcast_job(job)
+                    else:
+                        raise _AutoCdkError(fail_msg, kind=fail_kind)
+
+        except asyncio.CancelledError:
+            job.status = "cancelled"
+            job.finished_at = time.time()
+            self._broadcast_job(job)
+            raise
+        except _AutoCdkError as exc:
+            # Trước khi mark error: nếu đã có access_token → verify Plus thật.
+            # Có thể lỗi mạng giữa chừng nhưng server baxigpt đã active thành công.
+            if job.access_token:
+                verified = await _autocdk_verify_plus(
+                    job.access_token, proxy=self._proxy, log=lambda m: self._job_log(job, m)
+                )
+                if verified is True:
+                    self._job_log(job, f"[autocdk] ✓ baxigpt error nhưng Plus đã active thật → override SUCCESS")
+                    job.status = "success"
+                    job.error = None
+                    job.error_kind = None
+                    job.order_id = None
+                    job.finished_at = time.time()
+                    self._broadcast_job(job)
+                    return
+            job.status = "error"
+            job.error = str(exc)
+            job.error_kind = exc.kind
+            # Terminal: order/CDK hỏng → bỏ order_id để retry submit lại từ đầu.
+            # Retriable: giữ order_id + access_token để retry chỉ poll/submit tiếp.
+            if exc.kind == "terminal":
+                job.order_id = None
+            job.finished_at = time.time()
+            self._job_log(job, f"[autocdk] {exc.kind} error: {exc}")
+            self._broadcast_job(job)
+        except Exception as exc:
+            job.status = "error"
+            job.error = str(exc)
+            job.error_kind = "retriable"
+            job.finished_at = time.time()
+            self._job_log(job, f"[autocdk] failed: {exc}")
+            self._broadcast_job(job)
+        finally:
+            self._tasks.pop(job.id, None)
+
+
+# Singleton
+_autocdk_manager: AutoCdkJobManager | None = None
+
+
+def get_autocdk_manager() -> AutoCdkJobManager:
+    global _autocdk_manager
+    if _autocdk_manager is None:
+        _autocdk_manager = AutoCdkJobManager(max_concurrent=1)
+    return _autocdk_manager
+
+
+# ─────────────────────────────────────────────────────────────────────
+# CdkCheckJobManager — Check CDK status (live/dead) qua baxigpt /api/query
+# ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class CdkCheckJob:
+    id: str
+    cdk_key: str
+    status: JobStatus = "queued"   # queued | running | live | dead | error
+    log_lines: list[str] = field(default_factory=list)
+    error: str | None = None
+    # Kết quả check
+    remaining: int | None = None
+    total: int | None = None
+    used: int | None = None
+    created_at: float = field(default_factory=time.time)
+    started_at: float | None = None
+    finished_at: float | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        quota = None
+        if self.total is not None:
+            used = self.used if self.used is not None else (
+                (self.total - self.remaining) if self.remaining is not None else None
+            )
+            if used is not None:
+                quota = f"{used}/{self.total}"
+        return {
+            "id": self.id,
+            "cdk_key": self.cdk_key,
+            "status": self.status,
+            "error": self.error,
+            "remaining": self.remaining,
+            "total": self.total,
+            "used": self.used,
+            "quota": quota,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "duration": (
+                (self.finished_at or time.time()) - self.started_at if self.started_at else None
+            ),
+            "log_count": len(self.log_lines),
+        }
+
+    def to_dict_full(self) -> dict[str, Any]:
+        d = self.to_dict()
+        d["log_lines"] = list(self.log_lines)
+        return d
+
+
+class CdkCheckJobManager:
+    """Check trạng thái CDK qua baxigpt /api/query (HTTP only, nhanh).
+
+    Logic: remaining >= 1 → 'live' (còn dùng được); remaining == 0 → 'dead'
+    (đã hết lượt, vd 1/1); ok=false → 'error' (CDK không tồn tại / lỗi mạng).
+    """
+
+    def __init__(self, *, max_concurrent: int = 5):
+        self.jobs: dict[str, CdkCheckJob] = {}
+        self.order: list[str] = []
+        self._max = max_concurrent
+        self._job_timeout = 60.0
+        self._proxy: str | None = _DEFAULT_PROXY
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._subscribers: set[asyncio.Queue] = set()
+        self._job_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._workers: list[asyncio.Task] = []
+        self._worker_started = False
+
+    def _ensure_workers(self) -> None:
+        if not self._worker_started:
+            self._worker_started = True
+        self._workers = [w for w in self._workers if not w.done()]
+        while len(self._workers) < self._max:
+            w = asyncio.create_task(self._worker_loop())
+            self._workers.append(w)
+        while len(self._workers) > self._max:
+            w = self._workers.pop()
+            w.cancel()
+
+    async def _worker_loop(self) -> None:
+        try:
+            while True:
+                job_id = await self._job_queue.get()
+                job = self.jobs.get(job_id)
+                if job is None or job.status != "queued":
+                    continue
+                inner = asyncio.create_task(self._run_job(job))
+                self._tasks[job_id] = inner
+                try:
+                    await inner
+                except asyncio.CancelledError:
+                    if inner.cancelled():
+                        continue
+                    raise
+                finally:
+                    self._tasks.pop(job_id, None)
+        except asyncio.CancelledError:
+            pass
+
+    @property
+    def max_concurrent(self) -> int:
+        return self._max
+
+    def set_max_concurrent(self, n: int) -> None:
+        if n < 1 or n > 20:
+            raise ValueError("max_concurrent phải trong [1, 20]")
+        self._max = n
+        self._ensure_workers()
+
+    @property
+    def job_timeout(self) -> float:
+        return self._job_timeout
+
+    def set_job_timeout(self, seconds: float) -> None:
+        if seconds < 10 or seconds > 600:
+            raise ValueError("job_timeout phải trong [10, 600]")
+        self._job_timeout = float(seconds)
+
+    @property
+    def proxy(self) -> str | None:
+        return self._proxy
+
+    def set_proxy(self, value: str | None) -> None:
+        if value is None:
+            self._proxy = None
+            return
+        v = str(value).strip()
+        self._proxy = v or None
+
+    def _safe_proxy_log(self) -> str:
+        return _mask_proxy(self._proxy)
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=500)
+        self._subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        self._subscribers.discard(q)
+
+    def _broadcast(self, event: dict[str, Any]) -> None:
+        for q in list(self._subscribers):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+    def _job_log(self, job: CdkCheckJob, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        job.log_lines.append(line)
+        if len(job.log_lines) > 200:
+            job.log_lines = job.log_lines[-200:]
+        self._broadcast({"type": "log", "job_id": job.id, "line": line})
+
+    def _broadcast_job(self, job: CdkCheckJob) -> None:
+        self._broadcast({"type": "job", "job": job.to_dict()})
+
+    def add_jobs(self, cdk_keys: list[str]) -> list[CdkCheckJob]:
+        existing = {j.cdk_key.lower() for j in self.jobs.values() if j.status != "cancelled"}
+        out: list[CdkCheckJob] = []
+        for raw in cdk_keys:
+            key = raw.strip()
+            if not key or key.startswith("#"):
+                continue
+            if key.lower() in existing:
+                continue  # dedup
+            existing.add(key.lower())
+            jid = uuid.uuid4().hex[:12]
+            job = CdkCheckJob(id=jid, cdk_key=key)
+            self.jobs[jid] = job
+            self.order.append(jid)
+            self._broadcast_job(job)
+            out.append(job)
+        self._ensure_workers()
+        for j in out:
+            if j.status == "queued":
+                self._job_queue.put_nowait(j.id)
+        return out
+
+    def stop_all(self) -> int:
+        while not self._job_queue.empty():
+            try:
+                self._job_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        count = 0
+        for job_id, job in list(self.jobs.items()):
+            if job.status in ("running", "queued"):
+                task = self._tasks.get(job_id)
+                if task and not task.done():
+                    task.cancel()
+                job.status = "cancelled"
+                job.finished_at = time.time()
+                self._broadcast_job(job)
+                count += 1
+        return count
+
+    def clear_finished(self) -> int:
+        removed = 0
+        for jid in list(self.order):
+            job = self.jobs.get(jid)
+            if job and job.status in ("live", "dead", "error"):
+                self.jobs.pop(jid, None)
+                self.order.remove(jid)
+                self._tasks.pop(jid, None)
+                removed += 1
+        if removed:
+            self._broadcast({"type": "clear_finished", "removed": removed})
+        return removed
+
+    def clear_cancelled(self) -> int:
+        removed = 0
+        for jid in list(self.order):
+            job = self.jobs.get(jid)
+            if job and job.status == "cancelled":
+                self.jobs.pop(jid, None)
+                self.order.remove(jid)
+                self._tasks.pop(jid, None)
+                removed += 1
+        if removed:
+            self._broadcast({"type": "clear_finished", "removed": removed})
+        return removed
+
+    def remove_job(self, job_id: str) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+            job.status = "cancelled"
+            job.finished_at = time.time()
+        self.jobs.pop(job_id, None)
+        if job_id in self.order:
+            self.order.remove(job_id)
+        self._tasks.pop(job_id, None)
+        self._broadcast({"type": "remove", "job_id": job_id})
+        return True
+
+    def retry_job(self, job_id: str) -> bool:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return False
+        task = self._tasks.get(job_id)
+        if task and not task.done():
+            task.cancel()
+        job.status = "queued"
+        job.error = None
+        job.remaining = None
+        job.total = None
+        job.used = None
+        job.started_at = None
+        job.finished_at = None
+        job.log_lines.append(f"[{datetime.now():%H:%M:%S}] -- retry --")
+        self._broadcast_job(job)
+        self._ensure_workers()
+        self._job_queue.put_nowait(job_id)
+        return True
+
+    def list_jobs(self) -> list[dict[str, Any]]:
+        return [self.jobs[jid].to_dict() for jid in self.order if jid in self.jobs]
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        job = self.jobs.get(job_id)
+        return job.to_dict_full() if job else None
+
+    def get_log(self, job_id: str) -> list[str]:
+        job = self.jobs.get(job_id)
+        return list(job.log_lines) if job else []
+
+    async def _run_job(self, job: CdkCheckJob) -> None:
+        self._tasks[job.id] = asyncio.current_task()
+        from ..config import env_insecure_tls
+        import httpx
+        try:
+            if job.id not in self.jobs:
+                return
+            job.status = "running"
+            job.started_at = time.time()
+            self._broadcast_job(job)
+
+            def log(msg: str) -> None:
+                self._job_log(job, msg)
+
+            log(f"[cdkcheck] checking {job.cdk_key}...")
+            client_kwargs: dict[str, Any] = {
+                "timeout": self._job_timeout,
+                "verify": not env_insecure_tls(),
+                "follow_redirects": True,
+            }
+            if self._proxy:
+                client_kwargs["proxy"] = self._proxy
+
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                # Dùng /api/query (trả used/total/remaining/status_code đầy đủ),
+                # fallback /api/code-info nếu query lỗi.
+                data = None
+                try:
+                    res = await client.post(
+                        "https://baxigpt.com/api/query",
+                        json={"code": job.cdk_key},
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    res.raise_for_status()
+                    data = res.json()
+                except Exception as exc:
+                    log(f"[cdkcheck] query lỗi, thử code-info: {exc}")
+                    try:
+                        res = await client.post(
+                            "https://baxigpt.com/api/code-info",
+                            json={"code": job.cdk_key},
+                            headers={"User-Agent": "Mozilla/5.0"},
+                        )
+                        res.raise_for_status()
+                        data = res.json()
+                    except Exception as exc2:
+                        job.status = "error"
+                        job.error = f"Network error: {exc2}"
+                        job.finished_at = time.time()
+                        log(f"[cdkcheck] network error: {exc2}")
+                        self._broadcast_job(job)
+                        return
+
+            if not isinstance(data, dict) or not data.get("ok"):
+                raw = (data or {}).get("msg") or "unknown"
+                job.status = "error"
+                job.error = _autocdk_translate_msg(raw)
+                job.finished_at = time.time()
+                log(f"[cdkcheck] invalid: {job.error}")
+                self._broadcast_job(job)
+                return
+
+            total = data.get("total")
+            remaining = data.get("remaining")
+            used = data.get("used")
+            if used is None and total is not None and remaining is not None:
+                used = total - remaining
+            job.total = total
+            job.remaining = remaining
+            job.used = used
+
+            # Logic: remaining >= 1 → live; remaining == 0 → dead
+            if remaining is not None and remaining >= 1:
+                job.status = "live"
+                log(f"[cdkcheck] ✓ LIVE — còn {remaining}/{total} lượt")
+            else:
+                job.status = "dead"
+                log(f"[cdkcheck] ✗ DEAD — đã hết lượt ({used}/{total})")
+            job.finished_at = time.time()
+            self._broadcast_job(job)
+
+        except asyncio.CancelledError:
+            job.status = "cancelled"
+            job.finished_at = time.time()
+            self._broadcast_job(job)
+            raise
+        except Exception as exc:
+            job.status = "error"
+            job.error = str(exc)
+            job.finished_at = time.time()
+            self._job_log(job, f"[cdkcheck] failed: {exc}")
+            self._broadcast_job(job)
+        finally:
+            self._tasks.pop(job.id, None)
+
+
+# Singleton
+_cdkcheck_manager: CdkCheckJobManager | None = None
+
+
+def get_cdkcheck_manager() -> CdkCheckJobManager:
+    global _cdkcheck_manager
+    if _cdkcheck_manager is None:
+        _cdkcheck_manager = CdkCheckJobManager(max_concurrent=5)
+    return _cdkcheck_manager

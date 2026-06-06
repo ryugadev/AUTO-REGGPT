@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .auth import get_token  # legacy — token auth disabled
-from .manager import get_manager, get_session_manager, get_link_manager, get_checker_manager
+from .manager import get_manager, get_session_manager, get_link_manager, get_checker_manager, get_autocdk_manager, get_cdkcheck_manager
 from .mail_modes import get_registry, serialize_for_api
 
 
@@ -152,6 +152,40 @@ async def retry_job(job_id: str) -> JSONResponse:
     ok = manager.retry_job(job_id)
     if not ok:
         raise HTTPException(404, "job not found")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/jobs/{job_id}/play-qr")
+async def play_qr_job(job_id: str) -> JSONResponse:
+    manager = get_manager()
+    job = manager.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if not job.payment_link:
+        raise HTTPException(400, "job does not have a payment link")
+    
+    from app.core.config import load_settings
+    import subprocess
+    import sys
+    settings = load_settings()
+    manager._job_log(job, "[post-reg] spawning background auto-fill UPI process via manual play...")
+    
+    log_path = settings.runtime_dir / f"stripe_auto_{job.id}.log"
+    try:
+        log_file = open(log_path, "w", encoding="utf-8")
+        subprocess.Popen([
+            sys.executable,
+            "-m", "app.services.stripe_auto",
+            "--url", job.payment_link,
+            "--proxy", manager.proxy or "",
+            "--job-id", job.id,
+            "--email", job.email,
+            "--region", "IN"
+        ], cwd=str(settings.root_dir), stdout=log_file, stderr=log_file)
+        log_file.close()
+    except Exception as e:
+        manager._job_log(job, f"[post-reg] Failed to spawn background process: {e}")
+        
     return JSONResponse({"ok": True})
 
 
@@ -700,6 +734,40 @@ async def retry_link_job(job_id: str) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/link/jobs/{job_id}/play-qr")
+async def play_qr_link_job(job_id: str) -> JSONResponse:
+    lm = get_link_manager()
+    job = lm.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if not job.payment_link:
+        raise HTTPException(400, "job does not have a payment link")
+    
+    from app.core.config import load_settings
+    import subprocess
+    import sys
+    settings = load_settings()
+    lm._job_log(job, "[link] spawning background auto-fill UPI process via manual play...")
+    
+    log_path = settings.runtime_dir / f"stripe_auto_{job.id}.log"
+    try:
+        log_file = open(log_path, "w", encoding="utf-8")
+        subprocess.Popen([
+            sys.executable,
+            "-m", "app.services.stripe_auto",
+            "--url", job.payment_link,
+            "--proxy", lm.proxy or "",
+            "--job-id", job.id,
+            "--email", job.email,
+            "--region", job.region
+        ], cwd=str(settings.root_dir), stdout=log_file, stderr=log_file)
+        log_file.close()
+    except Exception as e:
+        lm._job_log(job, f"[link] Failed to spawn background process: {e}")
+        
+    return JSONResponse({"ok": True})
+
+
 @app.delete("/api/link/jobs/{job_id}")
 async def delete_link_job(job_id: str) -> JSONResponse:
     lm = get_link_manager()
@@ -874,6 +942,320 @@ async def delete_checker_job(job_id: str) -> JSONResponse:
 async def checker_events(request: Request) -> StreamingResponse:
     """SSE stream cho checker jobs."""
     cm = get_checker_manager()
+    queue = cm.subscribe()
+
+    async def gen():
+        try:
+            snapshot = {
+                "type": "snapshot",
+                "max_concurrent": cm.max_concurrent,
+                "job_timeout": cm.job_timeout,
+                "proxy": cm.proxy,
+                "jobs": cm.list_jobs(),
+            }
+            yield f"data: {json.dumps(snapshot)}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=5.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            cm.unsubscribe(queue)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Auto CDK API
+# ─────────────────────────────────────────────────────────────────────
+
+
+class AddAutoCdkJobsRequest(BaseModel):
+    combos: str = Field(..., description="Account combos (email|password|secret)")
+    cdk_keys: str = Field(..., description="CDK keys")
+    mode: str = Field(default="combo", description="Input mode: 'combo' or 'access_token'")
+
+
+class SetAutoCdkConfigRequest(BaseModel):
+    max_concurrent: int | None = Field(default=None, ge=1, le=10)
+    job_timeout: float | None = Field(default=None, ge=30, le=600)
+    proxy: str | None = Field(
+        default=None,
+        description="HTTP/HTTPS proxy URL. Empty string = direct.",
+    )
+
+
+@app.post("/api/autocdk/jobs")
+async def add_autocdk_jobs(payload: AddAutoCdkJobsRequest) -> JSONResponse:
+    combo_lines = payload.combos.splitlines()
+    cdk_lines = payload.cdk_keys.splitlines()
+    am = get_autocdk_manager()
+    jobs = am.add_jobs(combo_lines, cdk_lines, mode=payload.mode)
+    return JSONResponse({"added": len(jobs), "jobs": [j.to_dict() for j in jobs]})
+
+
+@app.get("/api/autocdk/jobs")
+async def list_autocdk_jobs() -> JSONResponse:
+    am = get_autocdk_manager()
+    return JSONResponse({
+        "max_concurrent": am.max_concurrent,
+        "job_timeout": am.job_timeout,
+        "proxy": am.proxy,
+        "jobs": am.list_jobs(),
+    })
+
+
+@app.get("/api/autocdk/config")
+async def get_autocdk_config() -> JSONResponse:
+    am = get_autocdk_manager()
+    return JSONResponse({
+        "max_concurrent": am.max_concurrent,
+        "job_timeout": am.job_timeout,
+        "proxy": am.proxy,
+    })
+
+
+@app.post("/api/autocdk/config")
+async def set_autocdk_config(payload: SetAutoCdkConfigRequest) -> JSONResponse:
+    am = get_autocdk_manager()
+    if payload.max_concurrent is not None:
+        try:
+            am.set_max_concurrent(payload.max_concurrent)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    if payload.job_timeout is not None:
+        try:
+            am.set_job_timeout(payload.job_timeout)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    if payload.proxy is not None:
+        am.set_proxy(payload.proxy)
+    return JSONResponse({
+        "max_concurrent": am.max_concurrent,
+        "job_timeout": am.job_timeout,
+        "proxy": am.proxy,
+    })
+
+
+@app.post("/api/autocdk/jobs/stop-all")
+async def stop_all_autocdk_jobs() -> JSONResponse:
+    am = get_autocdk_manager()
+    cancelled = am.stop_all()
+    return JSONResponse({"cancelled": cancelled})
+
+
+@app.post("/api/autocdk/jobs/clear-finished")
+async def clear_finished_autocdk_jobs() -> JSONResponse:
+    am = get_autocdk_manager()
+    removed = am.clear_finished()
+    return JSONResponse({"removed": removed})
+
+
+@app.get("/api/autocdk/jobs/{job_id}")
+async def get_autocdk_job(job_id: str) -> JSONResponse:
+    am = get_autocdk_manager()
+    data = am.get_job(job_id)
+    if data is None:
+        raise HTTPException(404, "job not found")
+    return JSONResponse(data)
+
+
+@app.post("/api/autocdk/jobs/{job_id}/retry")
+async def retry_autocdk_job(job_id: str) -> JSONResponse:
+    am = get_autocdk_manager()
+    job = am.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    if job.status != "error":
+        raise HTTPException(400, "job is not in error status")
+    am.retry_job(job_id)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/autocdk/jobs/{job_id}")
+async def delete_autocdk_job(job_id: str) -> JSONResponse:
+    am = get_autocdk_manager()
+    ok = am.remove_job(job_id)
+    if not ok:
+        raise HTTPException(404, "job not found")
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/autocdk/events")
+async def autocdk_events(request: Request) -> StreamingResponse:
+    """SSE stream cho autocdk jobs."""
+    am = get_autocdk_manager()
+    queue = am.subscribe()
+
+    async def gen():
+        try:
+            snapshot = {
+                "type": "snapshot",
+                "max_concurrent": am.max_concurrent,
+                "job_timeout": am.job_timeout,
+                "proxy": am.proxy,
+                "jobs": am.list_jobs(),
+            }
+            yield f"data: {json.dumps(snapshot)}\n\n"
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=5.0)
+                    yield f"data: {json.dumps(event)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+                except (asyncio.CancelledError, GeneratorExit):
+                    break
+        except (asyncio.CancelledError, GeneratorExit):
+            pass
+        finally:
+            am.unsubscribe(queue)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# CDK Check API — kiểm tra trạng thái CDK (live/dead)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class AddCdkCheckJobsRequest(BaseModel):
+    cdk_keys: str = Field(..., description="CDK keys, mỗi dòng 1 key")
+
+
+class SetCdkCheckConfigRequest(BaseModel):
+    max_concurrent: int | None = Field(default=None, ge=1, le=20)
+    job_timeout: float | None = Field(default=None, ge=10, le=600)
+    proxy: str | None = Field(default=None)
+
+
+@app.post("/api/cdkcheck/jobs")
+async def add_cdkcheck_jobs(payload: AddCdkCheckJobsRequest) -> JSONResponse:
+    keys = payload.cdk_keys.splitlines()
+    cm = get_cdkcheck_manager()
+    jobs = cm.add_jobs(keys)
+    return JSONResponse({"added": len(jobs), "jobs": [j.to_dict() for j in jobs]})
+
+
+@app.get("/api/cdkcheck/jobs")
+async def list_cdkcheck_jobs() -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    return JSONResponse({
+        "max_concurrent": cm.max_concurrent,
+        "job_timeout": cm.job_timeout,
+        "proxy": cm.proxy,
+        "jobs": cm.list_jobs(),
+    })
+
+
+@app.get("/api/cdkcheck/config")
+async def get_cdkcheck_config() -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    return JSONResponse({
+        "max_concurrent": cm.max_concurrent,
+        "job_timeout": cm.job_timeout,
+        "proxy": cm.proxy,
+    })
+
+
+@app.post("/api/cdkcheck/config")
+async def set_cdkcheck_config(payload: SetCdkCheckConfigRequest) -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    if payload.max_concurrent is not None:
+        try:
+            cm.set_max_concurrent(payload.max_concurrent)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    if payload.job_timeout is not None:
+        try:
+            cm.set_job_timeout(payload.job_timeout)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    if payload.proxy is not None:
+        cm.set_proxy(payload.proxy)
+    return JSONResponse({
+        "max_concurrent": cm.max_concurrent,
+        "job_timeout": cm.job_timeout,
+        "proxy": cm.proxy,
+    })
+
+
+@app.post("/api/cdkcheck/jobs/stop-all")
+async def stop_all_cdkcheck_jobs() -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    return JSONResponse({"cancelled": cm.stop_all()})
+
+
+@app.post("/api/cdkcheck/jobs/clear-finished")
+async def clear_finished_cdkcheck_jobs() -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    return JSONResponse({"removed": cm.clear_finished()})
+
+
+@app.post("/api/cdkcheck/jobs/clear-cancelled")
+async def clear_cancelled_cdkcheck_jobs() -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    return JSONResponse({"removed": cm.clear_cancelled()})
+
+
+@app.get("/api/cdkcheck/jobs/{job_id}")
+async def get_cdkcheck_job(job_id: str) -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    data = cm.get_job(job_id)
+    if data is None:
+        raise HTTPException(404, "job not found")
+    return JSONResponse(data)
+
+
+@app.post("/api/cdkcheck/jobs/{job_id}/retry")
+async def retry_cdkcheck_job(job_id: str) -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    job = cm.jobs.get(job_id)
+    if job is None:
+        raise HTTPException(404, "job not found")
+    cm.retry_job(job_id)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/cdkcheck/jobs/{job_id}")
+async def delete_cdkcheck_job(job_id: str) -> JSONResponse:
+    cm = get_cdkcheck_manager()
+    ok = cm.remove_job(job_id)
+    if not ok:
+        raise HTTPException(404, "job not found")
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/cdkcheck/events")
+async def cdkcheck_events(request: Request) -> StreamingResponse:
+    """SSE stream cho CDK check jobs."""
+    cm = get_cdkcheck_manager()
     queue = cm.subscribe()
 
     async def gen():
